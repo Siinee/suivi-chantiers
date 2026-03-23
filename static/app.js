@@ -685,9 +685,38 @@ function renderPlanning(chantiers, items) {
     `Édité le ${today.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' })}`;
 }
 
+// ── Fusion des phases adjacentes/consécutives du même type ───────────────────
+// Deux items du même chantier + même phase séparés par ≤1 jour → un seul bloc
+function mergeAdjacentPhases(items) {
+  const byPhase = {};
+  items.forEach(item => {
+    (byPhase[item.phase] = byPhase[item.phase] || []).push({ ...item });
+  });
+  const result = [];
+  Object.values(byPhase).forEach(list => {
+    list.sort((a, b) => new Date(a.dateDebut) - new Date(b.dateDebut));
+    let cur = null;
+    for (const item of list) {
+      if (!cur) { cur = { ...item }; continue; }
+      const curEnd   = new Date(cur.dateFin   + 'T23:59:59');
+      const nextStart = new Date(item.dateDebut + 'T00:00:00');
+      const gapDays  = (nextStart - curEnd) / 86400000;
+      if (gapDays <= 1) {
+        // Fusion : on étend la date de fin
+        if (item.dateFin > cur.dateFin) cur.dateFin = item.dateFin;
+      } else {
+        result.push(cur); cur = { ...item };
+      }
+    }
+    if (cur) result.push(cur);
+  });
+  return result;
+}
+
 function renderChantierPlanningRow(chantier, allItems, periods, today) {
-  const myItems = allItems.filter(i => String(i.chantierId) === String(chantier.id));
-  const pct = chantier.progress || 0, col = progressColor(pct);
+  // Filtrer puis fusionner les phases adjacentes du même type
+  const raw     = allItems.filter(i => String(i.chantierId) === String(chantier.id));
+  const myItems = mergeAdjacentPhases(raw);
 
   const cells = periods.map(period => {
     const isNow = today >= period.start && today <= period.end;
@@ -743,12 +772,6 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
       <td class="cal-chantier-td">
         <div class="fw-semibold text-truncate" title="${esc(chantier.nom)}">${esc(chantier.nom)}</div>
         <small class="text-muted d-block text-truncate">${esc(chantier.client||'')}</small>
-        <div class="d-flex align-items-center gap-1 mt-1">
-          <div class="flex-grow-1" style="background:#e2e8f0;height:3px;border-radius:2px">
-            <div style="width:${pct}%;background:${col};height:3px;border-radius:2px"></div>
-          </div>
-          <span style="font-size:.65rem;font-weight:700;color:${col}">${pct}%</span>
-        </div>
       </td>
       ${cells}
     </tr>`;
