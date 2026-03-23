@@ -685,38 +685,8 @@ function renderPlanning(chantiers, items) {
     `Édité le ${today.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' })}`;
 }
 
-// ── Fusion des phases adjacentes/consécutives du même type ───────────────────
-// Deux items du même chantier + même phase séparés par ≤1 jour → un seul bloc
-function mergeAdjacentPhases(items) {
-  const byPhase = {};
-  items.forEach(item => {
-    (byPhase[item.phase] = byPhase[item.phase] || []).push({ ...item });
-  });
-  const result = [];
-  Object.values(byPhase).forEach(list => {
-    list.sort((a, b) => new Date(a.dateDebut) - new Date(b.dateDebut));
-    let cur = null;
-    for (const item of list) {
-      if (!cur) { cur = { ...item }; continue; }
-      const curEnd   = new Date(cur.dateFin   + 'T23:59:59');
-      const nextStart = new Date(item.dateDebut + 'T00:00:00');
-      const gapDays  = (nextStart - curEnd) / 86400000;
-      if (gapDays <= 1) {
-        // Fusion : on étend la date de fin
-        if (item.dateFin > cur.dateFin) cur.dateFin = item.dateFin;
-      } else {
-        result.push(cur); cur = { ...item };
-      }
-    }
-    if (cur) result.push(cur);
-  });
-  return result;
-}
-
 function renderChantierPlanningRow(chantier, allItems, periods, today) {
-  // Filtrer puis fusionner les phases adjacentes du même type
-  const raw     = allItems.filter(i => String(i.chantierId) === String(chantier.id));
-  const myItems = mergeAdjacentPhases(raw);
+  const myItems = allItems.filter(i => String(i.chantierId) === String(chantier.id));
 
   const cells = periods.map(period => {
     const isNow = today >= period.start && today <= period.end;
@@ -738,31 +708,37 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
               </td>`;
     }
 
-    // Construire les blocs phase — hauteur fixe, max 2 visibles
+    // Construire les blocs — chaque item = 1 semaine exactement
+    // Détecter les voisins de même phase pour coller visuellement les blocs adjacents
     const buildBlock = (item) => {
-      const iStart  = new Date(item.dateDebut + 'T00:00:00');
-      const iEnd    = new Date(item.dateFin   + 'T23:59:59');
-      const isFirst = period.start <= iStart;
-      const isLast  = period.end   >= iEnd;
-      const pos = isFirst && isLast ? 'block-solo'
-                : isFirst           ? 'block-start'
-                : isLast            ? 'block-end'
-                :                     'block-mid';
       const ph = phaseInfo(item.phase);
+
+      // Vérifier si la semaine précédente contient la même phase (pour coller)
+      const prevMon = new Date(period.start); prevMon.setDate(prevMon.getDate() - 7);
+      const nextMon = new Date(period.start); nextMon.setDate(nextMon.getDate() + 7);
+      const hasSameLeft  = myItems.some(i => i.phase === item.phase
+                            && new Date(i.dateDebut+'T00:00:00') >= prevMon
+                            && new Date(i.dateDebut+'T00:00:00') < period.start);
+      const hasSameRight = myItems.some(i => i.phase === item.phase
+                            && new Date(i.dateDebut+'T00:00:00') >= nextMon
+                            && new Date(i.dateDebut+'T00:00:00') < new Date(nextMon.getTime() + 7*86400000));
+
+      let pos;
+      if (hasSameLeft && hasSameRight)  pos = 'block-mid';
+      else if (hasSameLeft)             pos = 'block-end';
+      else if (hasSameRight)            pos = 'block-start';
+      else                              pos = 'block-solo';
+
       return `
         <div class="phase-block ${pos}"
              style="background:${ph.bg};color:${ph.color};border-color:${ph.border}"
              title="${esc(item.phase)} : ${fmtDate(item.dateDebut)} → ${fmtDate(item.dateFin)}"
              onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
-          ${isFirst ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
+          ${!hasSameLeft ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
         </div>`;
     };
 
-    // Afficher au max 2 phases pour garder la hauteur de ligne fixe
-    const shown  = active.slice(0, 2);
-    const hidden = active.length - shown.length;
-    const blocks = shown.map(buildBlock).join('')
-                 + (hidden > 0 ? `<div class="phase-more">+${hidden}</div>` : '');
+    const blocks = active.map(buildBlock).join('');
 
     return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>${blocks}</td>`;
   }).join('');
