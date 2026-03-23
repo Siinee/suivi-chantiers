@@ -647,11 +647,13 @@ function renderPlanning(chantiers, items) {
       <small class="text-muted fw-semibold">Phases :</small>
       ${PLANNING_PHASES.map(p => `
         <span class="phase-legend-chip"
-              style="background:${p.bg};color:${p.color};border:1px solid ${p.border}">
-          ${p.nom}
+              draggable="true"
+              ondragstart="dragPhase(event,'${esc(p.nom)}')"
+              style="background:${p.bg};color:${p.color};border:1px solid ${p.border};cursor:grab">
+          <i class="bi bi-grip-vertical me-1 opacity-50" style="font-size:.7rem"></i>${p.nom}
         </span>`).join('')}
       <small class="text-muted ms-2">
-        <i class="bi bi-hand-index me-1"></i>Cliquer sur une cellule vide pour placer une phase.
+        <i class="bi bi-hand-index-thumb me-1"></i>Glisser une phase sur le planning, ou cliquer sur une cellule.
       </small>
     </div>
 
@@ -697,32 +699,43 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
       return period.start <= e && period.end >= s;
     });
 
+    // Attributs communs (drag-drop sur toutes les cellules)
+    const cellAttrs = `data-cid="${chantier.id}" data-pkey="${period.key}" data-pend="${toISO(period.end)}"
+                       ondragover="calDragOver(event)" ondragleave="calDragLeave(event)" ondrop="calDrop(event)"`;
+
     if (active.length === 0) {
-      return `<td class="cal-cell cal-empty${isNow?' cal-today-col':''}"
+      return `<td class="cal-cell cal-empty${isNow?' cal-today-col':''}" ${cellAttrs}
                   onclick="showAddPlanningModal('${chantier.id}','${period.key}')">
               </td>`;
     }
 
-    const blocks = active.map(item => {
-      const iStart = new Date(item.dateDebut + 'T00:00:00');
-      const iEnd   = new Date(item.dateFin   + 'T23:59:59');
+    // Construire les blocs phase — hauteur fixe, max 2 visibles
+    const buildBlock = (item) => {
+      const iStart  = new Date(item.dateDebut + 'T00:00:00');
+      const iEnd    = new Date(item.dateFin   + 'T23:59:59');
       const isFirst = period.start <= iStart;
       const isLast  = period.end   >= iEnd;
-      const posClass = isFirst && isLast ? 'block-solo'
-                     : isFirst           ? 'block-start'
-                     : isLast            ? 'block-end'
-                     :                     'block-mid';
+      const pos = isFirst && isLast ? 'block-solo'
+                : isFirst           ? 'block-start'
+                : isLast            ? 'block-end'
+                :                     'block-mid';
       const ph = phaseInfo(item.phase);
       return `
-        <div class="phase-block ${posClass}"
+        <div class="phase-block ${pos}"
              style="background:${ph.bg};color:${ph.color};border-color:${ph.border}"
              title="${esc(item.phase)} : ${fmtDate(item.dateDebut)} → ${fmtDate(item.dateFin)}"
              onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
           ${isFirst ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
         </div>`;
-    }).join('');
+    };
 
-    return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}">${blocks}</td>`;
+    // Afficher au max 2 phases pour garder la hauteur de ligne fixe
+    const shown  = active.slice(0, 2);
+    const hidden = active.length - shown.length;
+    const blocks = shown.map(buildBlock).join('')
+                 + (hidden > 0 ? `<div class="phase-more">+${hidden}</div>` : '');
+
+    return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>${blocks}</td>`;
   }).join('');
 
   return `
@@ -835,6 +848,46 @@ async function updatePlanningItem(id) {
 async function deletePlanningItem(id) {
   await API.del(`/api/planning/items/${id}`);
   toast('Phase supprimée.', 'danger'); closeModal(); loadPlanning();
+}
+
+// ── Drag-and-drop phases ──────────────────────────────────────────────────────
+let _draggedPhase = null;
+
+function dragPhase(event, phaseName) {
+  _draggedPhase = phaseName;
+  event.dataTransfer.setData('text/plain', phaseName);
+  event.dataTransfer.effectAllowed = 'copy';
+}
+
+function calDragOver(event) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+  event.currentTarget.classList.add('cal-drag-over');
+}
+
+function calDragLeave(event) {
+  // Ignorer si on entre dans un enfant (phase-block)
+  if (!event.currentTarget.contains(event.relatedTarget))
+    event.currentTarget.classList.remove('cal-drag-over');
+}
+
+async function calDrop(event) {
+  event.preventDefault();
+  const td = event.currentTarget;
+  td.classList.remove('cal-drag-over');
+
+  const phase = _draggedPhase || event.dataTransfer.getData('text/plain');
+  _draggedPhase = null;
+  if (!phase) return;
+
+  const chantierId = td.dataset.cid;
+  const dateDebut  = td.dataset.pkey;   // ISO lundi (ou 1er du mois)
+  const dateFin    = td.dataset.pend;   // ISO dimanche (ou dernier du mois)
+  if (!chantierId || !dateDebut) return;
+
+  await API.post('/api/planning/items', { chantierId, phase, dateDebut, dateFin });
+  toast(`« ${phase} » placé.`);
+  loadPlanning();
 }
 
 // ── Navigation planning ───────────────────────────────────────────────────────
