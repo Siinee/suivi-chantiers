@@ -55,7 +55,19 @@ function fmtDate(d) {
 function parseDate(s) {
   if (!s) return null; const d = new Date(s); return isNaN(d) ? null : d;
 }
-function toISO(d) { return d.toISOString().split('T')[0]; }
+// toISO en heure LOCALE (pas UTC) pour éviter le décalage de jour
+function toISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+// Parse YYYY-MM-DD en date LOCALE (jamais UTC)
+function localDate(iso) {
+  const [y,m,d] = iso.split('-').map(Number);
+  return new Date(y, m-1, d, 0, 0, 0, 0);
+}
+function localDateEnd(iso) {
+  const [y,m,d] = iso.split('-').map(Number);
+  return new Date(y, m-1, d, 23, 59, 59, 999);
+}
 function progressColor(pct) {
   return pct >= 70 ? '#22c55e' : pct >= 30 ? '#f59e0b' : '#ef4444';
 }
@@ -693,8 +705,8 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
 
     // Items actifs sur cette période
     const active = myItems.filter(i => {
-      const s = new Date(i.dateDebut + 'T00:00:00');
-      const e = new Date(i.dateFin   + 'T23:59:59');
+      const s = localDate(i.dateDebut);
+      const e = localDateEnd(i.dateFin);
       return period.start <= e && period.end >= s;
     });
 
@@ -713,15 +725,16 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
     const buildBlock = (item) => {
       const ph = phaseInfo(item.phase);
 
-      // Vérifier si la semaine précédente contient la même phase (pour coller)
+      // Vérifier si la semaine précédente/suivante contient la même phase (pour coller)
       const prevMon = new Date(period.start); prevMon.setDate(prevMon.getDate() - 7);
       const nextMon = new Date(period.start); nextMon.setDate(nextMon.getDate() + 7);
+      const nextMonEnd = new Date(nextMon.getTime() + 7 * 86400000);
       const hasSameLeft  = myItems.some(i => i.phase === item.phase
-                            && new Date(i.dateDebut+'T00:00:00') >= prevMon
-                            && new Date(i.dateDebut+'T00:00:00') < period.start);
+                            && localDate(i.dateDebut) >= prevMon
+                            && localDate(i.dateDebut) < period.start);
       const hasSameRight = myItems.some(i => i.phase === item.phase
-                            && new Date(i.dateDebut+'T00:00:00') >= nextMon
-                            && new Date(i.dateDebut+'T00:00:00') < new Date(nextMon.getTime() + 7*86400000));
+                            && localDate(i.dateDebut) >= nextMon
+                            && localDate(i.dateDebut) < nextMonEnd);
 
       let pos;
       if (hasSameLeft && hasSameRight)  pos = 'block-mid';
@@ -755,9 +768,9 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
 
 // ── Modals planning items ─────────────────────────────────────────────────────
 function showAddPlanningModal(chantierId, isoMonday) {
-  // Calculer fin de semaine (dimanche)
-  const monday = new Date(isoMonday + 'T00:00:00');
-  const sunday = new Date(monday); sunday.setDate(sunday.getDate() + 6);
+  // Calculer fin de semaine (vendredi = lundi + 4 jours ouvrés, mais on garde dimanche pour la couverture)
+  const monday  = localDate(isoMonday);
+  const sunday  = new Date(monday); sunday.setDate(sunday.getDate() + 6);
   const isoSunday = toISO(sunday);
 
   openModal(
