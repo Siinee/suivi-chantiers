@@ -8,14 +8,25 @@ app = Flask(__name__)
 
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'chantiers.xlsx')
 
+# Catégories par défaut créées à chaque nouveau chantier
 DEFAULT_CATEGORIES = [
-    'Montage', 'Maçonnerie', 'CE/Levée de réserve', 'Démontage',
-    'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai', 'Désamiantage'
+    'Préparatoire', 'Montage', 'Maçonnerie', 'CE/Levée de réserve',
+    'Démontage', 'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai', 'Désamiantage'
 ]
 
-CHANTIER_HEADERS = ['id', 'nom', 'adresse', 'client', 'logoUrl', 'dateDebut', 'dateFin', 'commentaires']
+# Tâches pré-chargées pour la phase Préparatoire (issues du fichier Excel client)
+DEFAULT_TASKS_PREPARATOIRE = [
+    'Relevé de gaine', 'Demande Plan (Fournisseur)', 'Plan ascenseur (BE)',
+    'Commande Fournisseur', 'Demande Mise en FAB', 'Demande PGC',
+    'PPSPS Manei', 'Planning Prév fournisseur', 'Planning Prév BE/Client',
+    'Devis ST', 'Demande Agrément ST', 'Commande ST',
+    'PPSPS ST', 'Demande Date VIC', 'Commande Base de vie', 'Commande Container'
+]
+
+CHANTIER_HEADERS  = ['id', 'nom', 'adresse', 'client', 'logoUrl', 'dateDebut', 'dateFin', 'commentaires']
 CATEGORIE_HEADERS = ['id', 'chantierId', 'nom', 'ordre', 'isCustom']
-TACHE_HEADERS = ['id', 'categorieId', 'nom', 'done']
+# établi / envoyé / validé : 0 = À commencer | 1 = En cours | 2 = Terminé
+TACHE_HEADERS     = ['id', 'categorieId', 'nom', 'etabli', 'envoye', 'valide']
 
 
 def ensure_data_dir():
@@ -65,18 +76,27 @@ def records_to_sheet(ws, records, headers):
         ws.append([r.get(h) for h in headers])
 
 
-def is_done(val):
-    return val in (True, 1, '1', 'True', 'true', 'TRUE')
+def int_val(v):
+    """Convertit une valeur de statut en entier 0/1/2."""
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def task_score(t):
+    """Somme des 3 étapes d'une tâche (max = 6)."""
+    return int_val(t.get('etabli')) + int_val(t.get('envoye')) + int_val(t.get('valide'))
 
 
 def compute_progress(categories, taches, chantier_id):
     cats = [c for c in categories if str(c.get('chantierId')) == str(chantier_id)]
-    total, done = 0, 0
+    total_max, total_score = 0, 0
     for cat in cats:
         t_list = [t for t in taches if str(t.get('categorieId')) == str(cat['id'])]
-        total += len(t_list)
-        done += sum(1 for t in t_list if is_done(t.get('done')))
-    return round((done / total * 100) if total > 0 else 0)
+        total_max   += len(t_list) * 6
+        total_score += sum(task_score(t) for t in t_list)
+    return round((total_score / total_max * 100) if total_max > 0 else 0)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -91,9 +111,9 @@ def index():
 @app.route('/api/chantiers', methods=['GET'])
 def get_chantiers():
     wb = load_wb()
-    chantiers = sheet_to_records(wb['Chantiers'])
+    chantiers  = sheet_to_records(wb['Chantiers'])
     categories = sheet_to_records(wb['Categories'])
-    taches = sheet_to_records(wb['Taches'])
+    taches     = sheet_to_records(wb['Taches'])
     for c in chantiers:
         c['progress'] = compute_progress(categories, taches, c['id'])
     return jsonify(chantiers)
@@ -102,9 +122,9 @@ def get_chantiers():
 @app.route('/api/chantiers/<chantier_id>', methods=['GET'])
 def get_chantier(chantier_id):
     wb = load_wb()
-    chantiers = sheet_to_records(wb['Chantiers'])
+    chantiers  = sheet_to_records(wb['Chantiers'])
     categories = sheet_to_records(wb['Categories'])
-    taches = sheet_to_records(wb['Taches'])
+    taches     = sheet_to_records(wb['Taches'])
 
     chantier = next((c for c in chantiers if str(c['id']) == chantier_id), None)
     if not chantier:
@@ -116,14 +136,16 @@ def get_chantier(chantier_id):
     )
     for cat in cats:
         tasks = [t for t in taches if str(t.get('categorieId')) == str(cat['id'])]
-        done = sum(1 for t in tasks if is_done(t.get('done')))
-        cat['tasks'] = tasks
-        cat['doneCount'] = done
+        score = sum(task_score(t) for t in tasks)
+        max_s = len(tasks) * 6
+        cat['tasks']      = tasks
         cat['totalCount'] = len(tasks)
-        cat['progress'] = round((done / len(tasks) * 100) if tasks else 0)
+        cat['score']      = score
+        cat['maxScore']   = max_s
+        cat['progress']   = round((score / max_s * 100) if max_s > 0 else 0)
 
     chantier['categories'] = cats
-    chantier['progress'] = compute_progress(categories, taches, chantier_id)
+    chantier['progress']   = compute_progress(categories, taches, chantier_id)
     return jsonify(chantier)
 
 
@@ -132,27 +154,27 @@ def create_chantier():
     data = request.json
     wb = load_wb()
     chantier_id = str(uuid.uuid4())
-    new_c = {
-        'id': chantier_id,
-        'nom': data.get('nom', ''),
-        'adresse': data.get('adresse', ''),
-        'client': data.get('client', ''),
-        'logoUrl': data.get('logoUrl', ''),
-        'dateDebut': data.get('dateDebut', ''),
-        'dateFin': data.get('dateFin', ''),
-        'commentaires': data.get('commentaires', ''),
-    }
+    new_c = {k: data.get(k, '') for k in CHANTIER_HEADERS}
+    new_c['id'] = chantier_id
+
     chantiers = sheet_to_records(wb['Chantiers'])
     chantiers.append(new_c)
     records_to_sheet(wb['Chantiers'], chantiers, CHANTIER_HEADERS)
 
     categories = sheet_to_records(wb['Categories'])
+    taches     = sheet_to_records(wb['Taches'])
+
     for i, name in enumerate(DEFAULT_CATEGORIES):
-        categories.append({
-            'id': str(uuid.uuid4()), 'chantierId': chantier_id,
-            'nom': name, 'ordre': i, 'isCustom': False
-        })
+        cat_id = str(uuid.uuid4())
+        categories.append({'id': cat_id, 'chantierId': chantier_id, 'nom': name, 'ordre': i, 'isCustom': False})
+        # Pré-charger les tâches de la phase Préparatoire
+        if name == 'Préparatoire':
+            for t_nom in DEFAULT_TASKS_PREPARATOIRE:
+                taches.append({'id': str(uuid.uuid4()), 'categorieId': cat_id,
+                                'nom': t_nom, 'etabli': 0, 'envoye': 0, 'valide': 0})
+
     records_to_sheet(wb['Categories'], categories, CATEGORIE_HEADERS)
+    records_to_sheet(wb['Taches'],     taches,     TACHE_HEADERS)
     save_wb(wb)
     new_c['progress'] = 0
     return jsonify(new_c), 201
@@ -181,7 +203,7 @@ def delete_chantier(chantier_id):
     records_to_sheet(wb['Chantiers'], chantiers, CHANTIER_HEADERS)
 
     categories = sheet_to_records(wb['Categories'])
-    cat_ids = {str(c['id']) for c in categories if str(c.get('chantierId')) == chantier_id}
+    cat_ids    = {str(c['id']) for c in categories if str(c.get('chantierId')) == chantier_id}
     categories = [c for c in categories if str(c.get('chantierId')) != chantier_id]
     records_to_sheet(wb['Categories'], categories, CATEGORIE_HEADERS)
 
@@ -198,17 +220,12 @@ def create_categorie():
     data = request.json
     wb = load_wb()
     categories = sheet_to_records(wb['Categories'])
-    new_cat = {
-        'id': str(uuid.uuid4()),
-        'chantierId': data['chantierId'],
-        'nom': data['nom'],
-        'ordre': len(categories),
-        'isCustom': True
-    }
+    new_cat = {'id': str(uuid.uuid4()), 'chantierId': data['chantierId'],
+               'nom': data['nom'], 'ordre': len(categories), 'isCustom': True}
     categories.append(new_cat)
     records_to_sheet(wb['Categories'], categories, CATEGORIE_HEADERS)
     save_wb(wb)
-    new_cat.update({'tasks': [], 'progress': 0, 'doneCount': 0, 'totalCount': 0})
+    new_cat.update({'tasks': [], 'progress': 0, 'totalCount': 0, 'score': 0, 'maxScore': 0})
     return jsonify(new_cat), 201
 
 
@@ -230,7 +247,8 @@ def create_tache():
     data = request.json
     wb = load_wb()
     taches = sheet_to_records(wb['Taches'])
-    new_t = {'id': str(uuid.uuid4()), 'categorieId': data['categorieId'], 'nom': data['nom'], 'done': False}
+    new_t = {'id': str(uuid.uuid4()), 'categorieId': data['categorieId'],
+              'nom': data['nom'], 'etabli': 0, 'envoye': 0, 'valide': 0}
     taches.append(new_t)
     records_to_sheet(wb['Taches'], taches, TACHE_HEADERS)
     save_wb(wb)
@@ -244,10 +262,9 @@ def update_tache(tache_id):
     taches = sheet_to_records(wb['Taches'])
     for t in taches:
         if str(t['id']) == tache_id:
-            if 'done' in data:
-                t['done'] = data['done']
-            if 'nom' in data:
-                t['nom'] = data['nom']
+            for key in ['nom', 'etabli', 'envoye', 'valide']:
+                if key in data:
+                    t[key] = data[key]
             break
     records_to_sheet(wb['Taches'], taches, TACHE_HEADERS)
     save_wb(wb)
@@ -268,9 +285,9 @@ def delete_tache(tache_id):
 @app.route('/api/planning', methods=['GET'])
 def get_planning():
     wb = load_wb()
-    chantiers = sheet_to_records(wb['Chantiers'])
+    chantiers  = sheet_to_records(wb['Chantiers'])
     categories = sheet_to_records(wb['Categories'])
-    taches = sheet_to_records(wb['Taches'])
+    taches     = sheet_to_records(wb['Taches'])
 
     result = []
     for ch in chantiers:
@@ -278,23 +295,19 @@ def get_planning():
             [c for c in categories if str(c.get('chantierId')) == str(ch['id'])],
             key=lambda x: x.get('ordre') or 0
         )
-        cats_info = []
-        total_all, done_all = 0, 0
+        cats_info, total_max, total_score = [], 0, 0
         for cat in cats:
             t_list = [t for t in taches if str(t.get('categorieId')) == str(cat['id'])]
-            done = sum(1 for t in t_list if is_done(t.get('done')))
-            total_all += len(t_list)
-            done_all += done
-            cats_info.append({
-                'nom': cat['nom'],
-                'progress': round((done / len(t_list) * 100) if t_list else 0),
-                'done': done, 'total': len(t_list)
-            })
-        result.append({
-            **ch,
-            'progress': round((done_all / total_all * 100) if total_all > 0 else 0),
-            'categories': cats_info
-        })
+            score  = sum(task_score(t) for t in t_list)
+            max_s  = len(t_list) * 6
+            total_max   += max_s
+            total_score += score
+            cats_info.append({'nom': cat['nom'],
+                               'progress': round((score / max_s * 100) if max_s > 0 else 0),
+                               'score': score, 'maxScore': max_s})
+        result.append({**ch,
+                        'progress': round((total_score / total_max * 100) if total_max > 0 else 0),
+                        'categories': cats_info})
     return jsonify(result)
 
 

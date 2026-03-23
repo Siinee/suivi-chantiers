@@ -49,18 +49,42 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
   align-items: center;
   justify-content: space-between;
 }
+/* ── Ligne tâche (3 étapes) ────────────────────────────────────────────────── */
+.task-columns-header {
+  padding: .25rem .25rem .1rem;
+  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: .2rem;
+}
+.step-col-header { width: 100px; font-size: .73rem; }
+
 .task-item {
   display: flex;
   align-items: center;
   gap: .5rem;
-  padding: .45rem .25rem;
+  padding: .4rem .25rem;
   border-radius: 6px;
   transition: background .1s;
+  border-bottom: 1px solid #f8fafc;
 }
+.task-item:last-child { border-bottom: none; }
 .task-item:hover { background: #f8fafc; }
-.task-item input[type=checkbox] { width: 17px; height: 17px; cursor: pointer; accent-color: #2563eb; }
-.task-item label { cursor: pointer; flex: 1; margin: 0; }
-.task-item label.done-label { text-decoration: line-through; color: #94a3b8; }
+.task-name { flex: 1; font-size: .85rem; }
+
+/* Bouton étape (Établi / Envoyé / Validé) */
+.step-btn {
+  width: 100px;
+  padding: 3px 6px;
+  border-radius: 20px;
+  border: none;
+  font-size: .72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter .1s, transform .1s;
+  text-align: center;
+  white-space: nowrap;
+}
+.step-btn:hover { filter: brightness(.92); transform: scale(1.05); }
+
 .task-delete-btn {
   opacity: 0;
   transition: opacity .15s;
@@ -68,8 +92,15 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
   border: none;
   color: #ef4444;
   padding: 0 4px;
+  width: 28px;
 }
 .task-item:hover .task-delete-btn { opacity: 1; }
+
+/* Print : afficher les étapes en texte */
+@media print {
+  .print-steps { display: flex !important; gap: 6px; font-size: .75rem; color: #555; }
+  .print-step  { white-space: nowrap; }
+}
 
 /* ── Planning / Gantt ────────────────────────────────────────────────────────── */
 .gantt-container {

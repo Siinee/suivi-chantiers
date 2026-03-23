@@ -1,11 +1,33 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Suivi Chantiers – SPA Vanilla JS
+   Modèle de suivi : 3 étapes par tâche (Établi / Envoyé / Validé)
+   Valeurs : 0 = À commencer | 1 = En cours | 2 = Terminé
+   Avancement = somme des valeurs / (nb_tâches × 6) × 100
    ═══════════════════════════════════════════════════════════════════════════ */
 
 // ── État global ──────────────────────────────────────────────────────────────
 const state = { view: 'dashboard', currentChantierId: null };
 
-// ── Utilitaires date ─────────────────────────────────────────────────────────
+// ── Constantes étapes ────────────────────────────────────────────────────────
+const STEPS = [
+  { key: 'etabli', label: 'Établi' },
+  { key: 'envoye', label: 'Envoyé' },
+  { key: 'valide', label: 'Validé' },
+];
+
+const STATUS = [
+  { val: 0, label: 'À commencer', bg: '#e2e8f0', color: '#64748b' },
+  { val: 1, label: 'En cours',    bg: '#fef9c3', color: '#a16207' },
+  { val: 2, label: 'Terminé',     bg: '#dcfce7', color: '#15803d' },
+];
+
+// ── Utilitaires ───────────────────────────────────────────────────────────────
+function intVal(v) { return parseInt(v, 10) || 0; }
+
+function taskScore(t) {
+  return intVal(t.etabli) + intVal(t.envoye) + intVal(t.valide);
+}
+
 function fmtDate(d) {
   if (!d) return '—';
   const dt = new Date(d);
@@ -21,11 +43,10 @@ function parseDate(s) {
 
 function statusInfo(dateDebut, dateFin, progress) {
   const today = new Date(); today.setHours(0,0,0,0);
-  const start = parseDate(dateDebut);
-  const end   = parseDate(dateFin);
-  if (progress >= 100) return { label: 'Terminé', cls: 'badge-termine' };
-  if (end && today > end) return { label: 'En retard', cls: 'badge-en-retard' };
-  if (start && today < start) return { label: 'À venir',  cls: 'badge-a-venir' };
+  const start = parseDate(dateDebut), end = parseDate(dateFin);
+  if (progress >= 100) return { label: 'Terminé',   cls: 'badge-termine' };
+  if (end   && today > end)   return { label: 'En retard', cls: 'badge-en-retard' };
+  if (start && today < start) return { label: 'À venir',   cls: 'badge-a-venir' };
   return { label: 'En cours', cls: 'badge-en-cours' };
 }
 
@@ -35,29 +56,34 @@ function progressColor(pct) {
   return '#ef4444';
 }
 
+function esc(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 // ── API ───────────────────────────────────────────────────────────────────────
 const API = {
-  get: (url) => fetch(url).then(r => r.json()),
-  post: (url, data) => fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }).then(r => r.json()),
-  put:  (url, data) => fetch(url, { method:'PUT',  headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }).then(r => r.json()),
-  del:  (url)       => fetch(url, { method:'DELETE' }).then(r => r.json()),
+  get:  url       => fetch(url).then(r => r.json()),
+  post: (url, d)  => fetch(url, { method:'POST',   headers:{'Content-Type':'application/json'}, body:JSON.stringify(d) }).then(r => r.json()),
+  put:  (url, d)  => fetch(url, { method:'PUT',    headers:{'Content-Type':'application/json'}, body:JSON.stringify(d) }).then(r => r.json()),
+  del:  url       => fetch(url, { method:'DELETE' }).then(r => r.json()),
 };
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, type = 'success') {
   const id = 'toast-' + Date.now();
   const colors = { success:'#22c55e', danger:'#ef4444', info:'#3b82f6', warning:'#f59e0b' };
-  const html = `
+  document.getElementById('toast-container').insertAdjacentHTML('beforeend', `
     <div id="${id}" class="toast align-items-center border-0 show" role="alert"
          style="background:${colors[type]||colors.info};color:#fff;min-width:260px">
       <div class="d-flex">
         <div class="toast-body fw-semibold">${msg}</div>
-        <button type="button" class="btn-close btn-close-white me-2 m-auto"
+        <button class="btn-close btn-close-white me-2 m-auto"
                 onclick="document.getElementById('${id}').remove()"></button>
       </div>
-    </div>`;
-  const container = document.getElementById('toast-container');
-  container.insertAdjacentHTML('beforeend', html);
+    </div>`);
   setTimeout(() => document.getElementById(id)?.remove(), 3500);
 }
 
@@ -79,7 +105,7 @@ function openModal(titleHtml, bodyHtml, footerHtml) {
   const el = document.getElementById('main-modal');
   const modal = new bootstrap.Modal(el);
   modal.show();
-  el.addEventListener('hidden.bs.modal', () => { el.remove(); });
+  el.addEventListener('hidden.bs.modal', () => el.remove());
   return modal;
 }
 
@@ -101,10 +127,9 @@ function navigate(view, param) {
 //  DASHBOARD
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadDashboard() {
-  const root = document.getElementById('app-root');
-  root.innerHTML = `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
-  const chantiers = await API.get('/api/chantiers');
-  renderDashboard(chantiers);
+  document.getElementById('app-root').innerHTML =
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+  renderDashboard(await API.get('/api/chantiers'));
 }
 
 function renderDashboard(chantiers) {
@@ -113,18 +138,19 @@ function renderDashboard(chantiers) {
     <div class="d-flex justify-content-between align-items-center mb-4 no-print">
       <div>
         <h4 class="mb-0 fw-bold text-dark"><i class="bi bi-building me-2 text-primary"></i>Tableau de bord</h4>
-        <small class="text-muted">${chantiers.length} chantier${chantiers.length !== 1 ? 's' : ''} au total</small>
+        <small class="text-muted">${chantiers.length} chantier${chantiers.length !== 1 ? 's' : ''}</small>
       </div>
       <button class="btn btn-primary" onclick="showChantierForm()">
         <i class="bi bi-plus-lg me-1"></i>Nouveau chantier
       </button>
     </div>
-    <div class="row g-3" id="chantiers-grid">
-      ${chantiers.length === 0 ? `
-        <div class="col-12 text-center py-5 text-muted">
-          <i class="bi bi-building-slash" style="font-size:3rem;opacity:.3"></i>
-          <p class="mt-3">Aucun chantier. Créez-en un ou importez un fichier Excel.</p>
-        </div>` : chantiers.map(renderChantierCard).join('')}
+    <div class="row g-3">
+      ${chantiers.length === 0
+        ? `<div class="col-12 text-center py-5 text-muted">
+             <i class="bi bi-building-slash" style="font-size:3rem;opacity:.3"></i>
+             <p class="mt-3">Aucun chantier. Créez-en un ou importez un fichier Excel.</p>
+           </div>`
+        : chantiers.map(renderChantierCard).join('')}
     </div>`;
 }
 
@@ -133,23 +159,19 @@ function renderChantierCard(c) {
   const color = progressColor(pct);
   const s = statusInfo(c.dateDebut, c.dateFin, pct);
   return `
-    <div class="col-xl-4 col-lg-6 col-md-6">
+    <div class="col-xl-4 col-lg-6">
       <div class="card chantier-card h-100" onclick="navigate('chantier','${c.id}')">
         <div class="card-header d-flex justify-content-between align-items-start">
           <div>
-            <div class="fw-bold fs-6">${esc(c.nom)}</div>
+            <div class="fw-bold">${esc(c.nom)}</div>
             <small class="opacity-75">${esc(c.client || '—')}</small>
           </div>
-          <span class="badge rounded-pill ${s.cls}" style="font-size:.75rem">${s.label}</span>
+          <span class="badge rounded-pill ${s.cls}">${s.label}</span>
         </div>
         <div class="card-body">
-          <p class="text-muted small mb-2">
-            <i class="bi bi-geo-alt me-1"></i>${esc(c.adresse || '—')}
-          </p>
-          <p class="text-muted small mb-3">
-            <i class="bi bi-calendar3 me-1"></i>${fmtDate(c.dateDebut)} → ${fmtDate(c.dateFin)}
-          </p>
-          <div class="d-flex justify-content-between align-items-center mb-1">
+          <p class="text-muted small mb-2"><i class="bi bi-geo-alt me-1"></i>${esc(c.adresse || '—')}</p>
+          <p class="text-muted small mb-3"><i class="bi bi-calendar3 me-1"></i>${fmtDate(c.dateDebut)} → ${fmtDate(c.dateFin)}</p>
+          <div class="d-flex justify-content-between mb-1">
             <small class="fw-semibold text-secondary">Avancement global</small>
             <small class="fw-bold" style="color:${color}">${pct}%</small>
           </div>
@@ -175,13 +197,10 @@ function renderChantierCard(c) {
 //  FORMULAIRE CHANTIER
 // ═══════════════════════════════════════════════════════════════════════════
 async function showChantierForm(id) {
-  let chantier = null;
-  if (id) {
-    chantier = await API.get(`/api/chantiers/${id}`);
-  }
-  const v = chantier || {};
-  const title = id ? `<i class="bi bi-pencil me-2"></i>Modifier le chantier` : `<i class="bi bi-plus-lg me-2"></i>Nouveau chantier`;
-  const body = `
+  const v = id ? await API.get(`/api/chantiers/${id}`) : {};
+  const title = id ? `<i class="bi bi-pencil me-2"></i>Modifier le chantier`
+                   : `<i class="bi bi-plus-lg me-2"></i>Nouveau chantier`;
+  openModal(title, `
     <form id="chantier-form">
       <div class="row g-3">
         <div class="col-md-6">
@@ -206,25 +225,23 @@ async function showChantierForm(id) {
         </div>
         <div class="col-12">
           <label class="form-label">URL du logo client</label>
-          <input type="text" class="form-control" id="f-logo" placeholder="https://..." value="${esc(v.logoUrl||'')}">
-          <div class="form-text">URL d'une image (PNG/JPG). Sera affiché sur les impressions.</div>
+          <input type="text" class="form-control" id="f-logo" placeholder="https://…" value="${esc(v.logoUrl||'')}">
+          <div class="form-text">Lien vers une image (PNG/JPG) — affiché sur les impressions.</div>
         </div>
         <div class="col-12">
           <label class="form-label">Commentaires</label>
           <textarea class="form-control" id="f-comments" rows="3">${esc(v.commentaires||'')}</textarea>
         </div>
       </div>
-    </form>`;
-  const footer = `
-    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
-    <button type="button" class="btn btn-primary" onclick="saveChantier('${id||''}')">
+    </form>`, `
+    <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+    <button class="btn btn-primary" onclick="saveChantier('${id||''}')">
       <i class="bi bi-check-lg me-1"></i>${id ? 'Enregistrer' : 'Créer le chantier'}
-    </button>`;
-  openModal(title, body, footer);
+    </button>`);
 }
 
 async function saveChantier(id) {
-  const nom = document.getElementById('f-nom').value.trim();
+  const nom    = document.getElementById('f-nom').value.trim();
   const client = document.getElementById('f-client').value.trim();
   if (!nom || !client) { toast('Nom et client sont obligatoires.', 'warning'); return; }
   const data = {
@@ -235,26 +252,20 @@ async function saveChantier(id) {
     logoUrl:      document.getElementById('f-logo').value.trim(),
     commentaires: document.getElementById('f-comments').value.trim(),
   };
-  if (id) {
-    await API.put(`/api/chantiers/${id}`, data);
-    toast('Chantier mis à jour.', 'success');
-  } else {
-    await API.post('/api/chantiers', data);
-    toast('Chantier créé avec succès.', 'success');
-  }
+  if (id) { await API.put(`/api/chantiers/${id}`, data); toast('Chantier mis à jour.'); }
+  else    { await API.post('/api/chantiers', data);       toast('Chantier créé.'); }
   closeModal();
-  if (state.view === 'chantier' && id) loadChantierDetail(id);
-  else loadDashboard();
+  if (state.view === 'chantier' && id) loadChantierDetail(id); else loadDashboard();
 }
 
 async function confirmDeleteChantier(id, nom) {
-  const body = `<p>Supprimer définitivement <strong>${esc(nom)}</strong> et toutes ses tâches ?</p>`;
-  const footer = `
-    <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
-    <button class="btn btn-danger" onclick="deleteChantier('${id}')">
-      <i class="bi bi-trash me-1"></i>Supprimer
-    </button>`;
-  openModal('<i class="bi bi-exclamation-triangle me-2"></i>Confirmer la suppression', body, footer);
+  openModal(
+    '<i class="bi bi-exclamation-triangle me-2"></i>Confirmer la suppression',
+    `<p>Supprimer <strong>${esc(nom)}</strong> et toutes ses tâches ?</p>`,
+    `<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+     <button class="btn btn-danger" onclick="deleteChantier('${id}')">
+       <i class="bi bi-trash me-1"></i>Supprimer
+     </button>`);
 }
 
 async function deleteChantier(id) {
@@ -268,75 +279,82 @@ async function deleteChantier(id) {
 //  DÉTAIL CHANTIER
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadChantierDetail(id) {
-  const root = document.getElementById('app-root');
-  root.innerHTML = `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
-  const c = await API.get(`/api/chantiers/${id}`);
-  renderChantierDetail(c);
+  document.getElementById('app-root').innerHTML =
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+  renderChantierDetail(await API.get(`/api/chantiers/${id}`));
 }
 
 function renderChantierDetail(c) {
-  const root = document.getElementById('app-root');
-  const pct = c.progress || 0;
+  const pct   = c.progress || 0;
   const color = progressColor(pct);
-  const s = statusInfo(c.dateDebut, c.dateFin, pct);
+  const s     = statusInfo(c.dateDebut, c.dateFin, pct);
 
-  root.innerHTML = `
-    <!-- Fil d'Ariane -->
+  document.getElementById('app-root').innerHTML = `
     <nav aria-label="breadcrumb" class="no-print mb-3">
       <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="#" onclick="navigate('dashboard')" class="text-primary text-decoration-none">Tableau de bord</a></li>
+        <li class="breadcrumb-item">
+          <a href="#" onclick="navigate('dashboard')" class="text-primary text-decoration-none">Tableau de bord</a>
+        </li>
         <li class="breadcrumb-item active">${esc(c.nom)}</li>
       </ol>
     </nav>
 
-    <!-- En-tête chantier -->
+    <!-- En-tête -->
     <div class="card border-0 shadow-sm mb-4" style="border-radius:12px;overflow:hidden">
-      <div class="card-body p-0">
-        <div class="p-4 d-flex flex-wrap gap-4 align-items-start" style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff">
-          <div class="flex-grow-1">
-            <div class="d-flex align-items-center gap-3 mb-2">
-              ${c.logoUrl ? `<img src="${esc(c.logoUrl)}" alt="logo" style="height:40px;object-fit:contain;background:#fff;border-radius:6px;padding:4px">` : ''}
-              <h4 class="mb-0 fw-bold">${esc(c.nom)}</h4>
-              <span class="badge rounded-pill ${s.cls}" style="font-size:.8rem">${s.label}</span>
-            </div>
-            <div class="d-flex flex-wrap gap-3 opacity-90 small">
-              <span><i class="bi bi-person-fill me-1"></i>${esc(c.client||'—')}</span>
-              <span><i class="bi bi-geo-alt-fill me-1"></i>${esc(c.adresse||'—')}</span>
-              <span><i class="bi bi-calendar3 me-1"></i>${fmtDate(c.dateDebut)} → ${fmtDate(c.dateFin)}</span>
-            </div>
-            ${c.commentaires ? `<p class="mt-2 mb-0 opacity-75 small">${esc(c.commentaires)}</p>` : ''}
+      <div class="p-4 d-flex flex-wrap gap-4 align-items-start"
+           style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff">
+        <div class="flex-grow-1">
+          <div class="d-flex align-items-center gap-3 mb-2">
+            ${c.logoUrl ? `<img src="${esc(c.logoUrl)}" alt="logo"
+                style="height:40px;object-fit:contain;background:#fff;border-radius:6px;padding:4px">` : ''}
+            <h4 class="mb-0 fw-bold">${esc(c.nom)}</h4>
+            <span class="badge rounded-pill ${s.cls}">${s.label}</span>
           </div>
-          <!-- Anneau de progression -->
-          <div class="text-center no-print">
-            ${progressRing(pct, color)}
-            <div class="small mt-1 opacity-90">Avancement global</div>
+          <div class="d-flex flex-wrap gap-3 opacity-90 small">
+            <span><i class="bi bi-person-fill me-1"></i>${esc(c.client||'—')}</span>
+            <span><i class="bi bi-geo-alt-fill me-1"></i>${esc(c.adresse||'—')}</span>
+            <span><i class="bi bi-calendar3 me-1"></i>${fmtDate(c.dateDebut)} → ${fmtDate(c.dateFin)}</span>
           </div>
-          <div class="no-print d-flex flex-column gap-2">
-            <button class="btn btn-light btn-sm" onclick="showChantierForm('${c.id}')">
-              <i class="bi bi-pencil me-1"></i>Modifier
-            </button>
-            <button class="btn btn-outline-light btn-sm" onclick="confirmDeleteChantier('${c.id}','${esc(c.nom)}')">
-              <i class="bi bi-trash me-1"></i>Supprimer
-            </button>
-          </div>
+          ${c.commentaires ? `<p class="mt-2 mb-0 opacity-75 small">${esc(c.commentaires)}</p>` : ''}
         </div>
-        <!-- Barre de progression globale -->
-        <div class="px-4 pb-3 pt-2" style="background:#fff">
-          <div class="d-flex justify-content-between mb-1">
-            <small class="fw-semibold text-secondary">Avancement global</small>
-            <small class="fw-bold" style="color:${color}">${pct}%</small>
-          </div>
-          <div class="progress" style="height:10px">
-            <div class="progress-bar" style="width:${pct}%;background:${color}"></div>
-          </div>
+        <!-- Anneau progression -->
+        <div class="text-center no-print">${progressRing(pct, '#fff')}</div>
+        <div class="no-print d-flex flex-column gap-2">
+          <button class="btn btn-light btn-sm" onclick="showChantierForm('${c.id}')">
+            <i class="bi bi-pencil me-1"></i>Modifier
+          </button>
+          <button class="btn btn-outline-light btn-sm"
+                  onclick="confirmDeleteChantier('${c.id}','${esc(c.nom)}')">
+            <i class="bi bi-trash me-1"></i>Supprimer
+          </button>
         </div>
       </div>
+      <div class="px-4 pb-3 pt-2 bg-white">
+        <div class="d-flex justify-content-between mb-1">
+          <small class="fw-semibold text-secondary">Avancement global</small>
+          <small class="fw-bold" style="color:${color}" id="global-pct-text">${pct}%</small>
+        </div>
+        <div class="progress" style="height:10px">
+          <div class="progress-bar" id="global-bar" style="width:${pct}%;background:${color}"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Légende statuts -->
+    <div class="d-flex gap-3 mb-3 no-print flex-wrap">
+      <small class="text-muted fw-semibold">Légende :</small>
+      ${STATUS.map(st => `
+        <span style="background:${st.bg};color:${st.color};padding:2px 10px;border-radius:20px;font-size:.78rem;font-weight:600">
+          ${st.label}
+        </span>`).join('')}
+      <small class="text-muted ms-2">Cliquer sur un statut pour le faire avancer.</small>
     </div>
 
     <!-- Catégories -->
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h5 class="mb-0 fw-bold"><i class="bi bi-list-check me-2 text-primary"></i>Catégories & Tâches</h5>
-      <button class="btn btn-sm btn-outline-primary no-print" onclick="showAddCategoryModal('${c.id}')">
+      <button class="btn btn-sm btn-outline-primary no-print"
+              onclick="showAddCategoryModal('${c.id}')">
         <i class="bi bi-plus-lg me-1"></i>Ajouter une catégorie
       </button>
     </div>
@@ -346,54 +364,73 @@ function renderChantierDetail(c) {
     </div>`;
 }
 
-function progressRing(pct, color) {
-  const r = 30, cx = 36, cy = 36;
-  const circ = 2 * Math.PI * r;
-  const fill = circ * (1 - pct/100);
+function progressRing(pct, textColor = '#1e40af') {
+  const r = 30, circ = 2 * Math.PI * r;
+  const fill = circ * (1 - pct / 100);
+  const col  = progressColor(pct);
   return `
     <div class="progress-ring">
       <svg width="72" height="72" viewBox="0 0 72 72">
-        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#ffffff33" stroke-width="6"/>
-        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="6"
+        <circle cx="36" cy="36" r="${r}" fill="none" stroke="#ffffff33" stroke-width="6"/>
+        <circle cx="36" cy="36" r="${r}" fill="none" stroke="${col}" stroke-width="6"
                 stroke-dasharray="${circ}" stroke-dashoffset="${fill}"
-                stroke-linecap="round" style="transition:stroke-dashoffset .4s ease"/>
+                stroke-linecap="round" style="transition:stroke-dashoffset .4s"/>
       </svg>
-      <div class="pct-text" style="color:#fff">${pct}%</div>
+      <div class="pct-text" style="color:${textColor}">${pct}%</div>
     </div>`;
 }
 
+// ── Catégorie ─────────────────────────────────────────────────────────────────
 function renderCategoryCard(cat, chantierId) {
-  const pct = cat.progress || 0;
+  const pct   = cat.progress || 0;
   const color = progressColor(pct);
   return `
-    <div class="col-xl-6" id="cat-${cat.id}">
-      <div class="category-card h-100">
+    <div class="col-12" id="cat-${cat.id}">
+      <div class="category-card">
         <div class="category-header">
           <div class="fw-semibold">${esc(cat.nom)}</div>
-          <div class="d-flex align-items-center gap-3 no-print">
-            <span class="small fw-bold" style="color:${color}">${pct}% (${cat.doneCount}/${cat.totalCount})</span>
-            <button class="btn btn-sm btn-outline-danger py-0 px-1"
+          <div class="d-flex align-items-center gap-3">
+            <span class="small fw-bold no-print" style="color:${color}">
+              ${pct}%
+            </span>
+            <span class="small text-muted">
+              (${cat.score||0} / ${cat.maxScore||0} pts)
+            </span>
+            <button class="btn btn-sm btn-outline-danger py-0 px-1 no-print"
                     onclick="confirmDeleteCategory('${cat.id}','${esc(cat.nom)}','${chantierId}')"
                     title="Supprimer la catégorie">
               <i class="bi bi-trash" style="font-size:.75rem"></i>
             </button>
           </div>
-          <div class="print-only small text-muted">${pct}% (${cat.doneCount}/${cat.totalCount})</div>
         </div>
         <div class="px-3 pt-2 pb-1">
-          <div class="progress mb-2" style="height:5px">
-            <div class="progress-bar" style="width:${pct}%;background:${color}"></div>
+          <div class="progress mb-1" style="height:5px">
+            <div class="progress-bar cat-bar-${cat.id}"
+                 style="width:${pct}%;background:${color}"></div>
           </div>
         </div>
-        <div class="px-3 pb-2" id="tasks-${cat.id}">
-          ${(cat.tasks||[]).map(t => renderTaskItem(t, chantierId)).join('')}
-          ${cat.tasks && cat.tasks.length === 0 ? `<p class="text-muted small mb-2">Aucune tâche.</p>` : ''}
+
+        <!-- En-tête colonnes -->
+        <div class="task-columns-header px-3 d-flex align-items-center gap-2 no-print">
+          <div class="flex-grow-1"></div>
+          ${STEPS.map(s => `
+            <div class="step-col-header text-center small fw-semibold text-secondary">${s.label}</div>
+          `).join('')}
+          <div style="width:28px"></div>
         </div>
+
+        <div class="px-3 pb-2" id="tasks-${cat.id}">
+          ${(cat.tasks||[]).map(t => renderTaskRow(t, chantierId)).join('')}
+          ${(!cat.tasks || cat.tasks.length === 0)
+            ? `<p class="text-muted small mb-2 pt-1">Aucune tâche. Ajoutez-en ci-dessous.</p>` : ''}
+        </div>
+
         <div class="px-3 pb-3 no-print">
           <div class="d-flex gap-2">
             <input type="text" class="form-control form-control-sm" id="new-task-${cat.id}"
-                   placeholder="Nouvelle tâche…" onkeydown="if(event.key==='Enter') addTask('${cat.id}','${chantierId}')">
-            <button class="btn btn-sm btn-primary btn-add-task"
+                   placeholder="Nouvelle tâche…"
+                   onkeydown="if(event.key==='Enter') addTask('${cat.id}','${chantierId}')">
+            <button class="btn btn-sm btn-primary"
                     onclick="addTask('${cat.id}','${chantierId}')">
               <i class="bi bi-plus-lg"></i>
             </button>
@@ -403,35 +440,68 @@ function renderCategoryCard(cat, chantierId) {
     </div>`;
 }
 
-function renderTaskItem(t, chantierId) {
-  const done = t.done === true || t.done === 1 || t.done === '1' || t.done === 'True' || t.done === 'true';
+// ── Ligne de tâche avec 3 étapes ──────────────────────────────────────────────
+function renderTaskRow(t, chantierId) {
+  const score = taskScore(t);
+  const pct   = Math.round(score / 6 * 100);
   return `
     <div class="task-item" id="task-${t.id}">
-      <input type="checkbox" id="cb-${t.id}" ${done ? 'checked' : ''}
-             onchange="toggleTask('${t.id}', this.checked, '${chantierId}')">
-      <label for="cb-${t.id}" class="${done ? 'done-label' : ''}">${esc(t.nom)}</label>
+      <div class="flex-grow-1 task-name">${esc(t.nom)}</div>
+      ${STEPS.map(step => {
+        const val = intVal(t[step.key]);
+        const st  = STATUS[val] || STATUS[0];
+        return `
+          <button class="step-btn no-print"
+                  style="background:${st.bg};color:${st.color}"
+                  title="${step.label} : ${st.label}"
+                  onclick="cycleStep('${t.id}','${step.key}',${val},'${chantierId}')">
+            ${st.label}
+          </button>`;
+      }).join('')}
+      <!-- Labels pour l'impression -->
+      <div class="print-steps d-none">
+        ${STEPS.map(step => {
+          const val = intVal(t[step.key]);
+          const st  = STATUS[val] || STATUS[0];
+          return `<span class="print-step">${step.label}: ${st.label}</span>`;
+        }).join(' | ')}
+      </div>
       <button class="task-delete-btn no-print" onclick="deleteTask('${t.id}','${chantierId}')">
         <i class="bi bi-x-lg" style="font-size:.8rem"></i>
       </button>
     </div>`;
 }
 
-async function toggleTask(id, done, chantierId) {
-  await API.put(`/api/taches/${id}`, { done });
+async function cycleStep(tacheId, stepKey, currentVal, chantierId) {
+  const newVal = (currentVal + 1) % 3; // 0→1→2→0
+  await API.put(`/api/taches/${tacheId}`, { [stepKey]: newVal });
+  // Mise à jour optimiste du bouton
+  const taskEl = document.getElementById(`task-${tacheId}`);
+  if (taskEl) {
+    const stepIdx = STEPS.findIndex(s => s.key === stepKey);
+    const btn = taskEl.querySelectorAll('.step-btn')[stepIdx];
+    if (btn) {
+      const st = STATUS[newVal];
+      btn.style.background = st.bg;
+      btn.style.color      = st.color;
+      btn.title            = `${STEPS[stepIdx].label} : ${st.label}`;
+      btn.textContent      = st.label;
+      btn.setAttribute('onclick',
+        `cycleStep('${tacheId}','${stepKey}',${newVal},'${chantierId}')`);
+    }
+  }
   refreshChantierProgress(chantierId);
 }
 
 async function addTask(catId, chantierId) {
   const input = document.getElementById(`new-task-${catId}`);
-  const nom = input.value.trim();
+  const nom   = input.value.trim();
   if (!nom) return;
   input.value = '';
   const t = await API.post('/api/taches', { categorieId: catId, nom });
   const container = document.getElementById(`tasks-${catId}`);
-  // remove "no tasks" placeholder if present
-  const placeholder = container.querySelector('p.text-muted');
-  if (placeholder) placeholder.remove();
-  container.insertAdjacentHTML('beforeend', renderTaskItem(t, chantierId));
+  container.querySelector('p.text-muted')?.remove();
+  container.insertAdjacentHTML('beforeend', renderTaskRow(t, chantierId));
   refreshChantierProgress(chantierId);
 }
 
@@ -442,13 +512,13 @@ async function deleteTask(id, chantierId) {
 }
 
 async function confirmDeleteCategory(catId, catNom, chantierId) {
-  const body = `<p>Supprimer la catégorie <strong>${esc(catNom)}</strong> et toutes ses tâches ?</p>`;
-  const footer = `
-    <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
-    <button class="btn btn-danger" onclick="deleteCategory('${catId}','${chantierId}')">
-      <i class="bi bi-trash me-1"></i>Supprimer
-    </button>`;
-  openModal('<i class="bi bi-exclamation-triangle me-2"></i>Confirmer', body, footer);
+  openModal(
+    '<i class="bi bi-exclamation-triangle me-2"></i>Confirmer',
+    `<p>Supprimer <strong>${esc(catNom)}</strong> et toutes ses tâches ?</p>`,
+    `<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+     <button class="btn btn-danger" onclick="deleteCategory('${catId}','${chantierId}')">
+       <i class="bi bi-trash me-1"></i>Supprimer
+     </button>`);
 }
 
 async function deleteCategory(catId, chantierId) {
@@ -460,15 +530,14 @@ async function deleteCategory(catId, chantierId) {
 }
 
 function showAddCategoryModal(chantierId) {
-  const body = `
-    <label class="form-label">Nom de la catégorie</label>
-    <input type="text" class="form-control" id="new-cat-name" placeholder="Ex: Étanchéité…">`;
-  const footer = `
-    <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
-    <button class="btn btn-primary" onclick="addCategory('${chantierId}')">
-      <i class="bi bi-plus-lg me-1"></i>Ajouter
-    </button>`;
-  openModal('<i class="bi bi-plus-circle me-2"></i>Nouvelle catégorie', body, footer);
+  openModal(
+    '<i class="bi bi-plus-circle me-2"></i>Nouvelle catégorie',
+    `<label class="form-label">Nom de la catégorie</label>
+     <input type="text" class="form-control" id="new-cat-name" placeholder="Ex: Étanchéité…">`,
+    `<button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+     <button class="btn btn-primary" onclick="addCategory('${chantierId}')">
+       <i class="bi bi-plus-lg me-1"></i>Ajouter
+     </button>`);
   setTimeout(() => document.getElementById('new-cat-name')?.focus(), 300);
 }
 
@@ -477,55 +546,50 @@ async function addCategory(chantierId) {
   if (!nom) { toast('Entrez un nom.', 'warning'); return; }
   const cat = await API.post('/api/categories', { chantierId, nom });
   closeModal();
-  const grid = document.getElementById('categories-grid');
-  grid.insertAdjacentHTML('beforeend', renderCategoryCard(cat, chantierId));
-  toast('Catégorie ajoutée.', 'success');
+  document.getElementById('categories-grid')
+          .insertAdjacentHTML('beforeend', renderCategoryCard(cat, chantierId));
+  toast('Catégorie ajoutée.');
 }
 
 async function refreshChantierProgress(chantierId) {
-  // Refresh progress without full reload
   const c = await API.get(`/api/chantiers/${chantierId}`);
-  // Update each category progress bar
-  (c.categories || []).forEach(cat => {
-    const card = document.getElementById(`cat-${cat.id}`);
-    if (!card) return;
-    const pct = cat.progress || 0;
-    const color = progressColor(pct);
-    const bar = card.querySelector('.progress-bar');
-    if (bar) bar.style.cssText = `width:${pct}%;background:${color}`;
-    const pctSpan = card.querySelector('.fw-bold.small');
-    if (pctSpan) {
-      pctSpan.style.color = color;
-      pctSpan.textContent = `${pct}% (${cat.doneCount}/${cat.totalCount})`;
-    }
-  });
-  // Update global progress bar
-  const globalPct = c.progress || 0;
+  const globalPct   = c.progress || 0;
   const globalColor = progressColor(globalPct);
-  const globalBar = document.querySelector('.card-body .progress-bar');
-  if (globalBar) globalBar.style.cssText = `width:${globalPct}%;background:${globalColor}`;
-  // Update global pct text
-  const globalPctText = document.querySelector('.card-body .fw-bold[style*="color"]');
-  if (globalPctText) { globalPctText.style.color = globalColor; globalPctText.textContent = `${globalPct}%`; }
-  // Update ring
-  const ringContainer = document.querySelector('.progress-ring');
-  if (ringContainer) ringContainer.outerHTML = progressRing(globalPct, globalColor);
+
+  // Barre & texte globaux
+  const bar = document.getElementById('global-bar');
+  const txt = document.getElementById('global-pct-text');
+  if (bar) { bar.style.width = `${globalPct}%`; bar.style.background = globalColor; }
+  if (txt) { txt.style.color = globalColor; txt.textContent = `${globalPct}%`; }
+
+  // Anneau
+  const ring = document.querySelector('.progress-ring');
+  if (ring) ring.outerHTML = progressRing(globalPct, '#fff');
+
+  // Barres par catégorie
+  (c.categories || []).forEach(cat => {
+    const bar = document.querySelector(`.cat-bar-${cat.id}`);
+    const pct = cat.progress || 0;
+    const col = progressColor(pct);
+    if (bar) { bar.style.width = `${pct}%`; bar.style.background = col; }
+
+    const header = document.querySelector(`#cat-${cat.id} .category-header .fw-bold.small`);
+    if (header) { header.style.color = col; header.textContent = `${pct}%`; }
+    const pts = document.querySelector(`#cat-${cat.id} .category-header .text-muted`);
+    if (pts) pts.textContent = `(${cat.score||0} / ${cat.maxScore||0} pts)`;
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  PLANNING
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadPlanning() {
-  const root = document.getElementById('app-root');
-  root.innerHTML = `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
-  const data = await API.get('/api/planning');
-  renderPlanning(data);
+  document.getElementById('app-root').innerHTML =
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+  renderPlanning(await API.get('/api/planning'));
 }
 
 function renderPlanning(data) {
-  const root = document.getElementById('app-root');
-
-  // Compute Gantt range
   let minDate = null, maxDate = null;
   data.forEach(c => {
     const s = parseDate(c.dateDebut), e = parseDate(c.dateFin);
@@ -533,13 +597,13 @@ function renderPlanning(data) {
     if (e && (!maxDate || e > maxDate)) maxDate = new Date(e);
   });
   const hasGantt = minDate && maxDate && maxDate > minDate;
-  const today = new Date(); today.setHours(0,0,0,0);
-  const totalMs = hasGantt ? (maxDate - minDate) : 1;
+  const totalMs  = hasGantt ? (maxDate - minDate) : 1;
+  const today    = new Date(); today.setHours(0,0,0,0);
 
-  root.innerHTML = `
+  document.getElementById('app-root').innerHTML = `
     <div class="d-flex justify-content-between align-items-center mb-4 no-print">
       <div>
-        <h4 class="mb-0 fw-bold text-dark"><i class="bi bi-calendar3 me-2 text-primary"></i>Planning multi-chantiers</h4>
+        <h4 class="mb-0 fw-bold"><i class="bi bi-calendar3 me-2 text-primary"></i>Planning multi-chantiers</h4>
         <small class="text-muted">${data.length} chantier${data.length !== 1 ? 's' : ''}</small>
       </div>
       <div class="d-flex gap-2">
@@ -547,17 +611,13 @@ function renderPlanning(data) {
           <i class="bi bi-arrow-left me-1"></i>Retour
         </button>
         <button class="btn btn-primary btn-sm" onclick="printPlanning()">
-          <i class="bi bi-printer me-1"></i>Imprimer
-        </button>
-        <button class="btn btn-success btn-sm" onclick="exportPDF()">
-          <i class="bi bi-file-earmark-pdf me-1"></i>PDF
+          <i class="bi bi-printer me-1"></i>Imprimer / PDF
         </button>
       </div>
     </div>
 
     ${hasGantt ? renderGantt(data, minDate, maxDate, totalMs, today) : ''}
 
-    <!-- Tableau récapitulatif -->
     <div class="card border-0 shadow-sm mt-4" style="border-radius:12px;overflow:hidden">
       <div class="card-header bg-primary text-white fw-bold">
         <i class="bi bi-table me-2"></i>Récapitulatif détaillé
@@ -576,41 +636,39 @@ function renderPlanning(data) {
               </tr>
             </thead>
             <tbody>
-              ${data.length === 0 ? `<tr><td colspan="6" class="text-center text-muted py-4">Aucun chantier.</td></tr>` :
-                data.map(c => renderPlanningRow(c)).join('')}
+              ${data.length === 0
+                ? `<tr><td colspan="6" class="text-center text-muted py-4">Aucun chantier.</td></tr>`
+                : data.map(renderPlanningRow).join('')}
             </tbody>
           </table>
         </div>
       </div>
     </div>`;
 
-  // Prepare print header
-  document.getElementById('print-date').textContent = `Édité le ${today.toLocaleDateString('fr-FR', {day:'2-digit', month:'long', year:'numeric'})}`;
+  document.getElementById('print-date').textContent =
+    `Édité le ${today.toLocaleDateString('fr-FR', {day:'2-digit', month:'long', year:'numeric'})}`;
 }
 
 function renderGantt(data, minDate, maxDate, totalMs, today) {
-  // Build month headers
   const months = [];
   let cur = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
   while (cur <= maxDate) {
-    const left = Math.max(0, (cur - minDate) / totalMs * 100);
-    months.push({ label: cur.toLocaleDateString('fr-FR', {month:'short', year:'2-digit'}), left });
+    months.push({ label: cur.toLocaleDateString('fr-FR', {month:'short', year:'2-digit'}),
+                  left: Math.max(0, (cur - minDate) / totalMs * 100) });
     cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
   }
-
-  // Today marker
   const todayPct = Math.min(100, Math.max(0, (today - minDate) / totalMs * 100));
 
   return `
     <div class="gantt-container mb-4">
-      <div class="gantt-header d-flex" style="position:relative;min-height:32px">
+      <div class="gantt-header d-flex" style="min-height:32px;position:relative">
         <div class="gantt-label" style="background:#f8fafc;font-size:.75rem;font-weight:600;color:#64748b;display:flex;align-items:center">
           Chantier
         </div>
         <div style="flex:1;position:relative;overflow:hidden">
           ${months.map(m => `
-            <span style="position:absolute;left:${m.left}%;font-size:.72rem;color:#64748b;padding-top:8px;
-                          border-left:1px solid #e2e8f0;padding-left:4px;top:0;bottom:0">
+            <span style="position:absolute;left:${m.left}%;font-size:.72rem;color:#64748b;
+                         border-left:1px solid #e2e8f0;padding:8px 0 0 4px;top:0;bottom:0">
               ${m.label}
             </span>`).join('')}
         </div>
@@ -623,19 +681,18 @@ function renderGantt(data, minDate, maxDate, totalMs, today) {
           width = Math.min(100 - left, (e - s) / totalMs * 100);
         }
         const pct = c.progress || 0;
-        const color = progressColor(pct);
+        const col = progressColor(pct);
         return `
           <div class="gantt-row d-flex" onclick="navigate('chantier','${c.id}')" style="cursor:pointer">
             <div class="gantt-label">
-              <div class="fw-semibold text-truncate" style="font-size:.82rem" title="${esc(c.nom)}">${esc(c.nom)}</div>
+              <div class="fw-semibold text-truncate" style="font-size:.82rem">${esc(c.nom)}</div>
               <div class="text-muted" style="font-size:.72rem">${esc(c.client||'')}</div>
             </div>
             <div class="gantt-track flex-grow-1" style="position:relative">
               <div class="gantt-today" style="left:${todayPct}%"></div>
-              ${s && e ? `
-              <div class="gantt-bar" style="left:${left}%;width:${width}%;background:linear-gradient(90deg,${color},${color}99)">
-                ${pct}%
-              </div>` : '<span class="text-muted" style="font-size:.75rem;padding-top:10px;padding-left:8px;display:block">Dates non définies</span>'}
+              ${s && e
+                ? `<div class="gantt-bar" style="left:${left}%;width:${width}%;background:linear-gradient(90deg,${col},${col}99)">${pct}%</div>`
+                : `<span class="text-muted" style="font-size:.75rem;padding:10px 0 0 8px;display:block">Dates non définies</span>`}
             </div>
           </div>`;
       }).join('')}
@@ -643,9 +700,7 @@ function renderGantt(data, minDate, maxDate, totalMs, today) {
 }
 
 function renderPlanningRow(c) {
-  const pct = c.progress || 0;
-  const color = progressColor(pct);
-  const cats = (c.categories || []).slice(0, 8);
+  const pct = c.progress || 0, col = progressColor(pct);
   return `
     <tr>
       <td>
@@ -654,26 +709,24 @@ function renderPlanningRow(c) {
           : `<span class="fw-semibold">${esc(c.client||'—')}</span>`}
       </td>
       <td>
-        <a href="#" onclick="navigate('chantier','${c.id}')" class="fw-semibold text-decoration-none text-primary">
-          ${esc(c.nom)}
-        </a>
+        <a href="#" onclick="navigate('chantier','${c.id}')"
+           class="fw-semibold text-decoration-none text-primary">${esc(c.nom)}</a>
       </td>
       <td class="text-muted">${esc(c.adresse||'—')}</td>
-      <td class="text-nowrap">
-        <small>${fmtDate(c.dateDebut)}<br>${fmtDate(c.dateFin)}</small>
-      </td>
+      <td class="text-nowrap"><small>${fmtDate(c.dateDebut)}<br>${fmtDate(c.dateFin)}</small></td>
       <td style="min-width:100px">
         <div class="progress mb-1" style="height:6px">
-          <div class="progress-bar" style="width:${pct}%;background:${color}"></div>
+          <div class="progress-bar" style="width:${pct}%;background:${col}"></div>
         </div>
-        <small class="fw-bold" style="color:${color}">${pct}%</small>
+        <small class="fw-bold" style="color:${col}">${pct}%</small>
       </td>
       <td>
-        ${cats.map(cat => {
+        ${(c.categories||[]).map(cat => {
           const done = cat.progress >= 100;
+          const nom  = cat.nom.length > 20 ? cat.nom.slice(0,18)+'…' : cat.nom;
           return `<span class="cat-pill ${done ? 'done' : ''}" title="${esc(cat.nom)}: ${cat.progress}%">
-            ${esc(cat.nom.length > 18 ? cat.nom.slice(0,16)+'…' : cat.nom)} ${cat.progress}%
-          </span>`;
+                    ${esc(nom)} ${cat.progress}%
+                  </span>`;
         }).join('')}
       </td>
     </tr>`;
@@ -682,16 +735,7 @@ function renderPlanningRow(c) {
 function printPlanning() {
   document.getElementById('print-header').style.display = 'block';
   window.print();
-  setTimeout(() => { document.getElementById('print-header').style.display = 'none'; }, 1000);
-}
-
-function exportPDF() {
-  document.getElementById('print-header').style.display = 'block';
-  document.getElementById('print-date').textContent =
-    `Édité le ${new Date().toLocaleDateString('fr-FR', {day:'2-digit', month:'long', year:'numeric'})}`;
-  // Trigger browser's save as PDF
-  window.print();
-  setTimeout(() => { document.getElementById('print-header').style.display = 'none'; }, 1000);
+  setTimeout(() => { document.getElementById('print-header').style.display = 'none'; }, 1200);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -702,28 +746,11 @@ async function importExcel(input) {
   if (!file) return;
   const fd = new FormData();
   fd.append('file', file);
-  const res = await fetch('/api/import', { method: 'POST', body: fd });
+  const res  = await fetch('/api/import', { method:'POST', body:fd });
   const data = await res.json();
-  if (data.success) {
-    toast('Fichier importé avec succès !', 'success');
-    navigate('dashboard');
-  } else {
-    toast('Erreur lors de l\'import.', 'danger');
-  }
+  if (data.success) { toast('Fichier importé !'); navigate('dashboard'); }
+  else              { toast('Erreur lors de l\'import.', 'danger'); }
   input.value = '';
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  UTILITAIRES
-// ═══════════════════════════════════════════════════════════════════════════
-function esc(str) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
