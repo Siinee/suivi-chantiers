@@ -603,6 +603,7 @@ async function loadPlanning() {
     API.get('/api/chantiers'),
     API.get('/api/planning/items'),
   ]);
+  _planningItems = items;   // Cache pour calDrop (fusion / blocage)
   renderPlanning(chantiers, items);
 }
 
@@ -703,57 +704,47 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
   const cells = periods.map(period => {
     const isNow = today >= period.start && today <= period.end;
 
-    // Items actifs sur cette période
-    const active = myItems.filter(i => {
+    // 1 seul item par cellule (le premier trouvé)
+    const item = myItems.find(i => {
       const s = localDate(i.dateDebut);
       const e = localDateEnd(i.dateFin);
       return period.start <= e && period.end >= s;
     });
 
-    // Attributs communs (drag-drop sur toutes les cellules)
+    // Attributs drag-drop (toutes les cellules)
     const cellAttrs = `data-cid="${chantier.id}" data-pkey="${period.key}" data-pend="${toISO(period.end)}"
                        ondragover="calDragOver(event)" ondragleave="calDragLeave(event)" ondrop="calDrop(event)"`;
 
-    if (active.length === 0) {
+    if (!item) {
       return `<td class="cal-cell cal-empty${isNow?' cal-today-col':''}" ${cellAttrs}
                   onclick="showAddPlanningModal('${chantier.id}','${period.key}')">
                 <div class="cal-inner"></div>
               </td>`;
     }
 
-    // Pour chaque item actif ce cycle : détecter les voisins de même phase
-    const buildBlock = (item) => {
-      const ph = phaseInfo(item.phase);
+    // Position du bloc : basée sur les dates réelles de l'item vs la période
+    const ph     = phaseInfo(item.phase);
+    const iStart = localDate(item.dateDebut);
+    const iEnd   = localDateEnd(item.dateFin);
+    const isFirst = iStart >= period.start && iStart <= period.end;
+    const isLast  = iEnd   >= period.start && iEnd   <= period.end;
 
-      const prevMon = new Date(period.start); prevMon.setDate(prevMon.getDate() - 7);
-      const nextMon = new Date(period.start); nextMon.setDate(nextMon.getDate() + 7);
-      const nextMonEnd = new Date(nextMon.getTime() + 7 * 86400000);
-      const hasSameLeft  = myItems.some(i => i.phase === item.phase
-                            && localDate(i.dateDebut) >= prevMon
-                            && localDate(i.dateDebut) < period.start);
-      const hasSameRight = myItems.some(i => i.phase === item.phase
-                            && localDate(i.dateDebut) >= nextMon
-                            && localDate(i.dateDebut) < nextMonEnd);
+    let pos;
+    if (isFirst && isLast)  pos = 'block-solo';
+    else if (isFirst)       pos = 'block-start';
+    else if (isLast)        pos = 'block-end';
+    else                    pos = 'block-mid';
 
-      let pos;
-      if (hasSameLeft && hasSameRight)  pos = 'block-mid';
-      else if (hasSameLeft)             pos = 'block-end';
-      else if (hasSameRight)            pos = 'block-start';
-      else                              pos = 'block-solo';
-
-      return `
-        <div class="phase-block ${pos}"
-             style="background:${ph.bg};color:${ph.color}"
-             title="${esc(item.phase)}"
-             onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
-          ${!hasSameLeft ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
-        </div>`;
-    };
-
-    const blocks = active.map(buildBlock).join('');
+    const block = `
+      <div class="phase-block ${pos}"
+           style="background:${ph.bg};color:${ph.color}"
+           title="${esc(item.phase)}"
+           onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
+        ${isFirst ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
+      </div>`;
 
     return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>
-              <div class="cal-inner">${blocks}</div>
+              <div class="cal-inner">${block}</div>
             </td>`;
   }).join('');
 
@@ -863,8 +854,9 @@ async function deletePlanningItem(id) {
   toast('Phase supprimée.', 'danger'); closeModal(); loadPlanning();
 }
 
-// ── Drag-and-drop phases ──────────────────────────────────────────────────────
-let _draggedPhase = null;
+// ── Cache des items planning (mis à jour à chaque loadPlanning) ──────────────
+let _planningItems = [];
+let _draggedPhase  = null;
 
 function dragPhase(event, phaseName) {
   _draggedPhase = phaseName;
@@ -879,7 +871,6 @@ function calDragOver(event) {
 }
 
 function calDragLeave(event) {
-  // Ignorer si on entre dans un enfant (phase-block)
   if (!event.currentTarget.contains(event.relatedTarget))
     event.currentTarget.classList.remove('cal-drag-over');
 }
@@ -894,11 +885,57 @@ async function calDrop(event) {
   if (!phase) return;
 
   const chantierId = td.dataset.cid;
-  const dateDebut  = td.dataset.pkey;   // ISO lundi (ou 1er du mois)
-  const dateFin    = td.dataset.pend;   // ISO dimanche (ou dernier du mois)
-  if (!chantierId || !dateDebut) return;
+  const periodKey  = td.dataset.pkey;   // ISO lundi
+  const periodEnd  = td.dataset.pend;   // ISO dimanche
+  if (!chantierId || !periodKey) return;
 
-  await API.post('/api/planning/items', { chantierId, phase, dateDebut, dateFin });
+  const dropStart = localDate(periodKey);
+  const dropEnd   = localDateEnd(periodEnd);
+  const myItems   = _planningItems.filter(i => String(i.chantierId) === chantierId);
+  const DAY       = 86400000;
+
+  // ── Règle 1 : cellule déjà occupée ? ──────────────────────────────────────
+  const existing = myItems.find(i => {
+    const s = localDate(i.dateDebut), e = localDateEnd(i.dateFin);
+    return dropStart <= e && dropEnd >= s;
+  });
+  if (existing) {
+    if (existing.phase === phase) return; // même phase, rien à faire
+    toast('Case déjà occupée par une autre phase.', 'warning');
+    return;
+  }
+
+  // ── Règle 2 : fusionner si même phase adjacente ───────────────────────────
+  // Voisin gauche : son dateFin (dimanche) est la veille de notre lundi
+  const adjLeft = myItems.find(i => {
+    if (i.phase !== phase) return false;
+    const gap = Math.round((dropStart.getTime() - localDate(i.dateFin).getTime()) / DAY);
+    return gap === 1;
+  });
+
+  // Voisin droite : son dateDebut (lundi) est le lendemain de notre dimanche
+  const dropEndDate = localDate(periodEnd); // dimanche sans heure
+  const adjRight = myItems.find(i => {
+    if (i.phase !== phase) return false;
+    const gap = Math.round((localDate(i.dateDebut).getTime() - dropEndDate.getTime()) / DAY);
+    return gap === 1;
+  });
+
+  if (adjLeft && adjRight) {
+    // Pont entre deux blocs : étendre le gauche jusqu'à la fin du droit, supprimer le droit
+    await API.put(`/api/planning/items/${adjLeft.id}`, { dateFin: adjRight.dateFin });
+    await API.del(`/api/planning/items/${adjRight.id}`);
+  } else if (adjLeft) {
+    // Étendre le voisin gauche vers la droite
+    await API.put(`/api/planning/items/${adjLeft.id}`, { dateFin: periodEnd });
+  } else if (adjRight) {
+    // Étendre le voisin droite vers la gauche
+    await API.put(`/api/planning/items/${adjRight.id}`, { dateDebut: periodKey });
+  } else {
+    // Aucun voisin : créer un nouveau bloc 1 semaine
+    await API.post('/api/planning/items', { chantierId, phase, dateDebut: periodKey, dateFin: periodEnd });
+  }
+
   toast(`« ${phase} » placé.`);
   loadPlanning();
 }
