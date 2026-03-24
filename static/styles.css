@@ -146,15 +146,29 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
 .cal-row:nth-child(even) .cal-chantier-td { background: #fafbfc; }
 .cal-row:hover .cal-chantier-td { background: #f0f9ff; }
 
-/* Cellule période — compacte, blocs collés bord à bord ─────────────────────── */
+/* Cellule période ───────────────────────────────────────────────────────────── */
 .cal-cell {
-  border: 1px solid #e9ecef; vertical-align: middle;
-  padding: 3px 0; height: 34px; max-height: 34px; overflow: hidden;
+  border: 1px solid #e9ecef;
+  padding: 0;
+  height: 34px;
+  max-height: 34px;
+  /* Le clip se fait via .cal-inner, pas sur le td (incompatible table) */
 }
 .cal-empty { cursor: pointer; }
 .cal-empty:hover { background: #f0f9ff; }
 .cal-row:nth-child(even) .cal-cell { background: #fafbfc; }
 .cal-row:nth-child(even) .cal-empty:hover { background: #e8f4fd; }
+
+/* Wrapper interne — c'est lui qui clip le contenu, pas le td ────────────── */
+.cal-inner {
+  position: relative;
+  width: 100%;
+  height: 34px;
+  overflow: hidden;        /* <- clip réel */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 
 /* Effet drag-over */
 .cal-drag-over {
@@ -163,33 +177,39 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
   outline-offset: -2px;
 }
 
-/* Blocs de phase — remplissent la cellule, 0 marge L/R pour se coller ────── */
+/* Blocs de phase ─────────────────────────────────────────────────────────── */
 .phase-block {
-  height: 26px; margin: 0;
-  display: flex; align-items: center;
-  font-size: .67rem; font-weight: 700;
-  overflow: hidden; white-space: nowrap;
-  cursor: pointer; border: none;
+  height: 26px;
+  min-height: 26px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  font-size: .67rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  border: none;
   transition: filter .1s;
-  pointer-events: all;
 }
 .phase-block:hover { filter: brightness(.88); }
 
-/* Solo = bloc isolé (coins arrondis des deux côtés, petite marge) */
-.phase-block.block-solo  { margin: 0 2px; border-radius: 5px; padding: 0 6px; justify-content: center; }
-/* Start = gauche arrondi, droite plate (collé au voisin droit de même phase) */
-.phase-block.block-start { margin-left: 2px; margin-right: 0; border-radius: 5px 0 0 5px; padding-left: 6px; }
-/* End = droite arrondie, gauche plate (collé au voisin gauche) */
-.phase-block.block-end   { margin-right: 2px; margin-left: 0; border-radius: 0 5px 5px 0; padding-right: 6px; }
-/* Mid = plat des deux côtés (entre deux mêmes phases) */
+/* Solo = bloc isolé, tient dans 1 cellule */
+.phase-block.block-solo  { margin: 0 2px; border-radius: 5px; padding: 0 4px; justify-content: center; }
+/* Start = gauche arrondi, collé à droite (même phase continue) */
+.phase-block.block-start { margin-left: 2px; margin-right: 0; border-radius: 5px 0 0 5px; padding-left: 4px; }
+/* End = droite arrondie, collé à gauche */
+.phase-block.block-end   { margin-right: 2px; margin-left: 0; border-radius: 0 5px 5px 0; padding-right: 4px; }
+/* Mid = plat des deux côtés */
 .phase-block.block-mid   { margin: 0; border-radius: 0; }
 
-.phase-label { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-
-/* Indicateur "+N phases cachées" */
-.phase-more {
-  font-size: .6rem; color: #94a3b8; text-align: center;
-  line-height: 1; padding: 1px 0;
+/* Nom de phase — tronqué avec … si trop long */
+.phase-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  display: block;
+  line-height: 26px;
 }
 
 /* ── Impression ──────────────────────────────────────────────────────────────── */
@@ -217,8 +237,9 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
     min-width: 110px; max-width: 110px;
     position: static; font-size: 7.5pt; padding: .3rem .4rem;
   }
-  .cal-cell { height: 32px; max-height: 32px; }
-  .phase-block { height: 14px; margin: 1px 0; font-size: 6pt; }
+  .cal-cell { height: 24px; max-height: 24px; }
+  .cal-inner { height: 24px; }
+  .phase-block { height: 18px; min-height: 18px; font-size: 5.5pt; }
   .phase-more  { font-size: 5.5pt; }
 
   .print-steps { display: flex !important; gap: 6px; font-size: .75rem; color: #555; }

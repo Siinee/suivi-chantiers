@@ -717,15 +717,14 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
     if (active.length === 0) {
       return `<td class="cal-cell cal-empty${isNow?' cal-today-col':''}" ${cellAttrs}
                   onclick="showAddPlanningModal('${chantier.id}','${period.key}')">
+                <div class="cal-inner"></div>
               </td>`;
     }
 
-    // Construire les blocs — chaque item = 1 semaine exactement
-    // Détecter les voisins de même phase pour coller visuellement les blocs adjacents
+    // Pour chaque item actif ce cycle : détecter les voisins de même phase
     const buildBlock = (item) => {
       const ph = phaseInfo(item.phase);
 
-      // Vérifier si la semaine précédente/suivante contient la même phase (pour coller)
       const prevMon = new Date(period.start); prevMon.setDate(prevMon.getDate() - 7);
       const nextMon = new Date(period.start); nextMon.setDate(nextMon.getDate() + 7);
       const nextMonEnd = new Date(nextMon.getTime() + 7 * 86400000);
@@ -744,8 +743,8 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
 
       return `
         <div class="phase-block ${pos}"
-             style="background:${ph.bg};color:${ph.color};border-color:${ph.border}"
-             title="${esc(item.phase)} : ${fmtDate(item.dateDebut)} → ${fmtDate(item.dateFin)}"
+             style="background:${ph.bg};color:${ph.color}"
+             title="${esc(item.phase)}"
              onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
           ${!hasSameLeft ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
         </div>`;
@@ -753,7 +752,9 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
 
     const blocks = active.map(buildBlock).join('');
 
-    return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>${blocks}</td>`;
+    return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>
+              <div class="cal-inner">${blocks}</div>
+            </td>`;
   }).join('');
 
   return `
