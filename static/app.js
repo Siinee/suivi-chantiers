@@ -694,8 +694,21 @@ function renderPlanning(chantiers, items) {
       </table>
     </div>`;
 
+  // Remplir l'en-tête d'impression
   document.getElementById('print-date').textContent =
-    `Édité le ${today.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' })}`;
+    `Édité le ${today.toLocaleDateString('fr-FR', { day:'2-digit', month:'long', year:'numeric' })}  •  ${windowLabel}`;
+
+  // Légende imprimable avec couleurs
+  document.getElementById('print-legend').innerHTML =
+    `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+       <span style="font-size:7pt;font-weight:700;color:#64748b">Phases :</span>
+       ${PLANNING_PHASES.map(p =>
+         `<span style="background:${p.bg};color:${p.color};border:1px solid ${p.border};
+                       padding:1px 7px;border-radius:3px;font-size:6.5pt;font-weight:700">
+            ${p.nom}
+          </span>`
+       ).join('')}
+     </div>`;
 }
 
 function renderChantierPlanningRow(chantier, allItems, periods, today) {

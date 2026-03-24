@@ -217,34 +217,105 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
 }
 
 /* ── Impression ──────────────────────────────────────────────────────────────── */
+
+/* CRUCIAL : forcer les couleurs de fond à l'impression (Chrome/Edge/Safari) */
+* {
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+  color-adjust: exact !important;
+}
+
+.print-header { display: none; }
+
 @media print {
-  /* Page paysage A4 */
-  @page { size: A4 landscape; margin: 8mm 10mm; }
+  @page { size: A4 landscape; margin: 6mm 8mm; }
 
-  .no-print, nav, .navbar { display: none !important; }
-  .main-content { margin-top: 0 !important; }
-  body { background: #fff; font-size: 9pt; }
-  .print-header { display: block !important; margin-bottom: .6rem; }
-  .chantier-card, .category-card { box-shadow: none; break-inside: avoid; }
+  .no-print, nav, .navbar, .toast-container, #modal-container { display: none !important; }
+  .main-content { margin-top: 0 !important; max-width: 100% !important; padding: 0 !important; }
+  body { background: #fff !important; font-size: 8pt; margin: 0; }
   .btn, button { display: none !important; }
-  a { color: inherit; text-decoration: none; }
+  a { color: inherit !important; text-decoration: none !important; }
 
-  /* Planning : grille compacte pour tenir sur une page paysage */
+  /* En-tête d'impression — visible */
+  .print-header { display: block !important; }
+
+  /* Chantier detail : propre à l'impression */
+  .chantier-card, .category-card { box-shadow: none !important; break-inside: avoid; }
+  .print-steps { display: flex !important; gap: 6px; font-size: 7pt; color: #555; }
+
+  /* ── Planning : grille compacte A4 paysage ──────────────────────────────── */
   .planning-cal-wrapper {
-    box-shadow: none; border: 1px solid #ccc;
-    overflow: visible;
+    box-shadow: none !important;
+    border: 2px solid #1e3a8a;
+    border-radius: 4px !important;
+    overflow: visible !important;
   }
-  .planning-cal { font-size: 7.5pt; }
-  .cal-period-th  { min-width: 38px; max-width: 38px; padding: .25rem .1rem; font-size: 6.5pt; }
-  .cal-period-th small { font-size: 5.5pt; }
-  .cal-chantier-th, .cal-chantier-td {
-    min-width: 110px; max-width: 110px;
-    position: static; font-size: 7.5pt; padding: .3rem .4rem;
-  }
-  .cal-cell { height: 24px; max-height: 24px; }
-  .cal-inner { height: 24px; }
-  .phase-block { height: 18px; min-height: 18px; font-size: 5.5pt; }
-  .phase-more  { font-size: 5.5pt; }
 
-  .print-steps { display: flex !important; gap: 6px; font-size: .75rem; color: #555; }
+  .planning-cal {
+    font-size: 7pt;
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  /* En-tête du tableau */
+  .cal-chantier-th {
+    position: static !important;
+    min-width: 100px !important; max-width: 100px !important;
+    font-size: 7pt; padding: 4px 5px;
+    background: #1e3a8a !important; color: #fff !important;
+    border: 1px solid #1e3a8a;
+  }
+  .cal-period-th {
+    min-width: unset !important; max-width: unset !important;
+    width: auto;
+    font-size: 6pt; padding: 3px 1px;
+    background: #f0f4ff !important; color: #1e3a8a !important;
+    border: 1px solid #cbd5e1;
+    font-weight: 700;
+  }
+  .cal-period-th small { font-size: 5pt; color: #64748b !important; }
+  .cal-period-th.cal-today-col {
+    background: #dbeafe !important;
+    font-weight: 800;
+  }
+
+  /* Cellules chantier */
+  .cal-chantier-td {
+    position: static !important;
+    min-width: 100px !important; max-width: 100px !important;
+    font-size: 7pt; padding: 3px 5px;
+    background: #fff !important;
+    border: 1px solid #cbd5e1;
+  }
+
+  /* Cellules du calendrier */
+  .cal-cell {
+    height: 22px !important; max-height: 22px !important;
+    border: 1px solid #e2e8f0;
+    padding: 0;
+  }
+  .cal-inner { height: 22px !important; }
+  .cal-empty { background: #fff !important; }
+  .cal-today-col { background: #f0f7ff !important; }
+
+  /* Bordures connectées — toujours transparentes à l'impression */
+  .cal-conn-r { border-right-color: transparent !important; }
+  .cal-conn-l { border-left-color: transparent !important; }
+
+  /* Blocs de phase */
+  .phase-block {
+    height: 16px !important; min-height: 16px !important;
+    font-size: 5.5pt !important;
+    font-weight: 800;
+    border: none !important;
+  }
+  .phase-block.block-solo  { margin: 0 1px !important; border-radius: 3px !important; }
+  .phase-block.block-start { margin-left: 1px !important; margin-right: 0 !important; border-radius: 3px 0 0 3px !important; }
+  .phase-block.block-end   { margin-right: 1px !important; margin-left: 0 !important; border-radius: 0 3px 3px 0 !important; }
+  .phase-block.block-mid   { margin: 0 !important; border-radius: 0 !important; }
+  .phase-label { line-height: 16px !important; }
+
+  /* Lignes alternées */
+  .cal-row:nth-child(even) .cal-cell { background: #fafbfc !important; }
+  .cal-row:nth-child(even) .cal-chantier-td { background: #fafbfc !important; }
 }
