@@ -159,6 +159,10 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
 .cal-row:nth-child(even) .cal-cell { background: #fafbfc; }
 .cal-row:nth-child(even) .cal-empty:hover { background: #e8f4fd; }
 
+/* Bordures supprimées entre cellules connectées (même bloc multi-semaines) */
+.cal-conn-r { border-right-color: transparent !important; }
+.cal-conn-l { border-left-color: transparent !important; }
+
 /* Wrapper interne — c'est lui qui clip le contenu, pas le td ────────────── */
 .cal-inner {
   position: relative;
@@ -195,12 +199,12 @@ body { background: #f1f5f9; font-family: 'Segoe UI', sans-serif; }
 .phase-block:hover { filter: brightness(.88); }
 
 /* Solo = bloc isolé, tient dans 1 cellule */
-.phase-block.block-solo  { margin: 0 2px; border-radius: 5px; padding: 0 4px; justify-content: center; }
-/* Start = gauche arrondi, collé à droite (même phase continue) */
-.phase-block.block-start { margin-left: 2px; margin-right: 0; border-radius: 5px 0 0 5px; padding-left: 4px; }
-/* End = droite arrondie, collé à gauche */
-.phase-block.block-end   { margin-right: 2px; margin-left: 0; border-radius: 0 5px 5px 0; padding-right: 4px; }
-/* Mid = plat des deux côtés */
+.phase-block.block-solo  { margin: 0 3px; border-radius: 5px; padding: 0 4px; justify-content: center; }
+/* Start = gauche arrondi, bord droit flush (pas de marge ni padding) */
+.phase-block.block-start { margin: 0; margin-left: 3px; border-radius: 5px 0 0 5px; padding-left: 5px; }
+/* End = droite arrondie, bord gauche flush */
+.phase-block.block-end   { margin: 0; margin-right: 3px; border-radius: 0 5px 5px 0; padding-right: 5px; }
+/* Mid = plat des deux côtés, flush partout */
 .phase-block.block-mid   { margin: 0; border-radius: 0; }
 
 /* Nom de phase — tronqué avec … si trop long */

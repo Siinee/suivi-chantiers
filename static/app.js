@@ -729,11 +729,11 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
     const isFirst = iStart >= period.start && iStart <= period.end;
     const isLast  = iEnd   >= period.start && iEnd   <= period.end;
 
-    let pos;
-    if (isFirst && isLast)  pos = 'block-solo';
-    else if (isFirst)       pos = 'block-start';
-    else if (isLast)        pos = 'block-end';
-    else                    pos = 'block-mid';
+    let pos, conn = '';
+    if (isFirst && isLast)  { pos = 'block-solo'; }
+    else if (isFirst)       { pos = 'block-start'; conn = 'cal-conn-r'; }
+    else if (isLast)        { pos = 'block-end';   conn = 'cal-conn-l'; }
+    else                    { pos = 'block-mid';   conn = 'cal-conn-l cal-conn-r'; }
 
     const block = `
       <div class="phase-block ${pos}"
@@ -743,7 +743,7 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
         ${isFirst ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
       </div>`;
 
-    return `<td class="cal-cell cal-has-phase${isNow?' cal-today-col':''}" ${cellAttrs}>
+    return `<td class="cal-cell cal-has-phase ${conn}${isNow?' cal-today-col':''}" ${cellAttrs}>
               <div class="cal-inner">${block}</div>
             </td>`;
   }).join('');
@@ -850,7 +850,36 @@ async function updatePlanningItem(id) {
 }
 
 async function deletePlanningItem(id) {
-  await API.del(`/api/planning/items/${id}`);
+  // Trouver l'item et tous les items adjacents de même phase (le bloc visuel complet)
+  const item = _planningItems.find(i => String(i.id) === String(id));
+  if (!item) { await API.del(`/api/planning/items/${id}`); closeModal(); loadPlanning(); return; }
+
+  const cid   = String(item.chantierId);
+  const phase = item.phase;
+  const same  = _planningItems.filter(i => String(i.chantierId) === cid && i.phase === phase);
+  const DAY   = 86400000;
+
+  // Construire l'ensemble connecté par propagation (flood-fill)
+  const ids = new Set([String(id)]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const s of same) {
+      if (ids.has(String(s.id))) continue;
+      for (const did of ids) {
+        const d = _planningItems.find(x => String(x.id) === did);
+        if (!d) continue;
+        const sS = localDate(s.dateDebut).getTime(), sE = localDate(s.dateFin).getTime();
+        const dS = localDate(d.dateDebut).getTime(), dE = localDate(d.dateFin).getTime();
+        // Adjacent (≤ 2 jours) ou chevauchant
+        if (sS <= dE + 2*DAY && sE >= dS - 2*DAY) {
+          ids.add(String(s.id)); changed = true; break;
+        }
+      }
+    }
+  }
+
+  await Promise.all([...ids].map(i => API.del(`/api/planning/items/${i}`)));
   toast('Phase supprimée.', 'danger'); closeModal(); loadPlanning();
 }
 
