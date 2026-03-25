@@ -1,14 +1,21 @@
+"""
+Suivi Chantiers — Backend Flask
+Base de données : SQLite (data/chantiers.db)
+API identique à la version Excel, frontend inchangé.
+"""
 from flask import Flask, jsonify, request, render_template, send_file
+import sqlite3, os, uuid, io
 import openpyxl
 from openpyxl import Workbook
-import os, uuid
 
 app = Flask(__name__)
-EXCEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'chantiers.xlsx')
+DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'chantiers.db')
 
-# ── Catégories de suivi (tâches) ──────────────────────────────────────────────
-# Seule catégorie par défaut = Préparatoire (basée sur le fichier Excel client)
-DEFAULT_CATEGORIES = ['Préparatoire']
+# Phases de planning (référence partagée)
+PLANNING_PHASES = [
+    'Désamiantage', 'Montage', 'Maçonnerie', 'CE/Levée de réserve',
+    'Démontage', 'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai'
+]
 
 DEFAULT_TASKS_PREPARATOIRE = [
     'Relevé de gaine', 'Demande Plan (Fournisseur)', 'Plan ascenseur (BE)',
@@ -18,296 +25,397 @@ DEFAULT_TASKS_PREPARATOIRE = [
     'PPSPS ST', 'Demande Date VIC', 'Commande Base de vie', 'Commande Container'
 ]
 
-# ── Phases planning (catégories de planning, pas de suivi) ────────────────────
-PLANNING_PHASES = [
-    'Désamiantage', 'Montage', 'Maçonnerie', 'CE/Levée de réserve',
-    'Démontage', 'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai'
-]
+# ── Base de données ───────────────────────────────────────────────────────────
 
-CHANTIER_HEADERS  = ['id', 'nom', 'adresse', 'client', 'logoUrl', 'dateDebut', 'dateFin', 'commentaires']
-CATEGORIE_HEADERS = ['id', 'chantierId', 'nom', 'ordre', 'isCustom']
-TACHE_HEADERS     = ['id', 'categorieId', 'nom', 'etabli', 'envoye', 'valide']
-PLANNING_HEADERS  = ['id', 'chantierId', 'phase', 'dateDebut', 'dateFin']
-
-
-def ensure_data_dir():
-    os.makedirs(os.path.dirname(EXCEL_PATH), exist_ok=True)
+def get_db():
+    """Connexion SQLite avec retour de dict."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
-def create_empty_workbook():
-    wb = Workbook()
-    ws = wb.active; ws.title = 'Chantiers'
-    ws.append(CHANTIER_HEADERS)
-    wb.create_sheet('Categories').append(CATEGORIE_HEADERS)
-    wb.create_sheet('Taches').append(TACHE_HEADERS)
-    wb.create_sheet('Planning').append(PLANNING_HEADERS)
-    return wb
+def init_db():
+    """Création des tables si elles n'existent pas."""
+    with get_db() as db:
+        db.executescript('''
+            CREATE TABLE IF NOT EXISTS chantiers (
+                id           TEXT PRIMARY KEY,
+                nom          TEXT NOT NULL,
+                adresse      TEXT,
+                client       TEXT,
+                logo_url     TEXT,
+                date_debut   TEXT,
+                date_fin     TEXT,
+                commentaires TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS categories (
+                id          TEXT PRIMARY KEY,
+                chantier_id TEXT NOT NULL,
+                nom         TEXT NOT NULL,
+                ordre       INTEGER DEFAULT 0,
+                is_custom   INTEGER DEFAULT 0,
+                FOREIGN KEY (chantier_id) REFERENCES chantiers(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS taches (
+                id           TEXT PRIMARY KEY,
+                categorie_id TEXT NOT NULL,
+                nom          TEXT NOT NULL,
+                etabli       INTEGER DEFAULT 0,
+                envoye       INTEGER DEFAULT 0,
+                valide       INTEGER DEFAULT 0,
+                FOREIGN KEY (categorie_id) REFERENCES categories(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS planning (
+                id          TEXT PRIMARY KEY,
+                chantier_id TEXT NOT NULL,
+                phase       TEXT NOT NULL,
+                date_debut  TEXT NOT NULL,
+                date_fin    TEXT NOT NULL,
+                FOREIGN KEY (chantier_id) REFERENCES chantiers(id) ON DELETE CASCADE
+            );
+        ''')
 
 
-def load_wb():
-    ensure_data_dir()
-    if not os.path.exists(EXCEL_PATH):
-        wb = create_empty_workbook(); wb.save(EXCEL_PATH)
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    # Créer les feuilles manquantes (rétro-compatibilité)
-    for name, headers in [('Chantiers', CHANTIER_HEADERS), ('Categories', CATEGORIE_HEADERS),
-                           ('Taches', TACHE_HEADERS), ('Planning', PLANNING_HEADERS)]:
-        if name not in wb.sheetnames:
-            wb.create_sheet(name).append(headers)
-    return wb
+def row_to_dict(row):
+    return dict(row) if row else None
 
 
-def save_wb(wb): ensure_data_dir(); wb.save(EXCEL_PATH)
+def rows_to_list(rows):
+    return [dict(r) for r in rows]
 
 
-def sheet_to_records(ws):
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows: return []
-    headers = [str(h) for h in rows[0]]
-    return [{headers[i]: (row[i] if i < len(row) else None)
-             for i in range(len(headers))}
-            for row in rows[1:] if not all(v is None for v in row)]
-
-
-def records_to_sheet(ws, records, headers):
-    ws.delete_rows(1, ws.max_row + 1)
-    ws.append(headers)
-    for r in records:
-        ws.append([r.get(h) for h in headers])
-
-
-def int_val(v):
-    try: return int(v or 0)
-    except: return 0
-
+# ── Calcul avancement ─────────────────────────────────────────────────────────
 
 def task_score(t):
-    return int_val(t.get('etabli')) + int_val(t.get('envoye')) + int_val(t.get('valide'))
+    return (t['etabli'] or 0) + (t['envoye'] or 0) + (t['valide'] or 0)
 
 
-def compute_progress(categories, taches, chantier_id):
-    cats = [c for c in categories if str(c.get('chantierId')) == str(chantier_id)]
-    total_max = total_score = 0
-    for cat in cats:
-        t_list = [t for t in taches if str(t.get('categorieId')) == str(cat['id'])]
-        total_max   += len(t_list) * 6
-        total_score += sum(task_score(t) for t in t_list)
-    return round((total_score / total_max * 100) if total_max > 0 else 0)
+def compute_progress_db(db, chantier_id):
+    rows = db.execute('''
+        SELECT t.etabli, t.envoye, t.valide
+        FROM taches t
+        JOIN categories c ON t.categorie_id = c.id
+        WHERE c.chantier_id = ?
+    ''', (chantier_id,)).fetchall()
+    if not rows:
+        return 0
+    total_score = sum((r['etabli'] or 0) + (r['envoye'] or 0) + (r['valide'] or 0) for r in rows)
+    total_max   = len(rows) * 6
+    return round(total_score / total_max * 100)
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 
 # ── Chantiers ─────────────────────────────────────────────────────────────────
 
-@app.route('/')
-def index(): return render_template('index.html')
-
-
 @app.route('/api/chantiers')
 def get_chantiers():
-    wb = load_wb()
-    chantiers  = sheet_to_records(wb['Chantiers'])
-    categories = sheet_to_records(wb['Categories'])
-    taches     = sheet_to_records(wb['Taches'])
-    for c in chantiers:
-        c['progress'] = compute_progress(categories, taches, c['id'])
-    return jsonify(chantiers)
+    with get_db() as db:
+        chantiers = rows_to_list(db.execute('SELECT * FROM chantiers ORDER BY nom').fetchall())
+        result = []
+        for c in chantiers:
+            c['progress'] = compute_progress_db(db, c['id'])
+            result.append(_camel(c))
+        return jsonify(result)
 
 
 @app.route('/api/chantiers/<cid>')
 def get_chantier(cid):
-    wb = load_wb()
-    chantiers  = sheet_to_records(wb['Chantiers'])
-    categories = sheet_to_records(wb['Categories'])
-    taches     = sheet_to_records(wb['Taches'])
-    c = next((x for x in chantiers if str(x['id']) == cid), None)
-    if not c: return jsonify({'error': 'Not found'}), 404
-    cats = sorted([x for x in categories if str(x.get('chantierId')) == cid],
-                  key=lambda x: x.get('ordre') or 0)
-    for cat in cats:
-        t_list  = [t for t in taches if str(t.get('categorieId')) == str(cat['id'])]
-        score   = sum(task_score(t) for t in t_list)
-        max_s   = len(t_list) * 6
-        cat.update({'tasks': t_list, 'totalCount': len(t_list),
-                    'score': score, 'maxScore': max_s,
-                    'progress': round((score / max_s * 100) if max_s > 0 else 0)})
-    c['categories'] = cats
-    c['progress']   = compute_progress(categories, taches, cid)
-    return jsonify(c)
+    with get_db() as db:
+        c = row_to_dict(db.execute('SELECT * FROM chantiers WHERE id=?', (cid,)).fetchone())
+        if not c:
+            return jsonify({'error': 'Not found'}), 404
+
+        cats = rows_to_list(db.execute(
+            'SELECT * FROM categories WHERE chantier_id=? ORDER BY ordre', (cid,)).fetchall())
+
+        for cat in cats:
+            tasks = rows_to_list(db.execute(
+                'SELECT * FROM taches WHERE categorie_id=?', (cat['id'],)).fetchall())
+            score   = sum(task_score(t) for t in tasks)
+            max_s   = len(tasks) * 6
+            cat['tasks']      = [_camel(t) for t in tasks]
+            cat['totalCount'] = len(tasks)
+            cat['score']      = score
+            cat['maxScore']   = max_s
+            cat['progress']   = round(score / max_s * 100) if max_s else 0
+            cat['isCustom']   = bool(cat.get('is_custom'))
+
+        c['categories'] = [_camel_cat(cat) for cat in cats]
+        c['progress']   = compute_progress_db(db, cid)
+        return jsonify(_camel(c))
 
 
 @app.route('/api/chantiers', methods=['POST'])
 def create_chantier():
     data = request.json
-    wb = load_wb()
-    cid = str(uuid.uuid4())
-    new_c = {k: data.get(k, '') for k in CHANTIER_HEADERS}
-    new_c['id'] = cid
-    chantiers = sheet_to_records(wb['Chantiers']); chantiers.append(new_c)
-    records_to_sheet(wb['Chantiers'], chantiers, CHANTIER_HEADERS)
-    categories = sheet_to_records(wb['Categories'])
-    taches     = sheet_to_records(wb['Taches'])
-    for i, name in enumerate(DEFAULT_CATEGORIES):
+    cid  = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute('''INSERT INTO chantiers
+            (id, nom, adresse, client, logo_url, date_debut, date_fin, commentaires)
+            VALUES (?,?,?,?,?,?,?,?)''',
+            (cid, data.get('nom',''), data.get('adresse',''), data.get('client',''),
+             data.get('logoUrl',''), data.get('dateDebut',''),
+             data.get('dateFin',''), data.get('commentaires','')))
+
+        # Catégorie Préparatoire par défaut
         cat_id = str(uuid.uuid4())
-        categories.append({'id': cat_id, 'chantierId': cid, 'nom': name, 'ordre': i, 'isCustom': False})
-        if name == 'Préparatoire':
-            for t_nom in DEFAULT_TASKS_PREPARATOIRE:
-                taches.append({'id': str(uuid.uuid4()), 'categorieId': cat_id,
-                               'nom': t_nom, 'etabli': 0, 'envoye': 0, 'valide': 0})
-    records_to_sheet(wb['Categories'], categories, CATEGORIE_HEADERS)
-    records_to_sheet(wb['Taches'],     taches,     TACHE_HEADERS)
-    save_wb(wb); new_c['progress'] = 0
-    return jsonify(new_c), 201
+        db.execute('''INSERT INTO categories (id, chantier_id, nom, ordre, is_custom)
+                      VALUES (?,?,?,?,?)''', (cat_id, cid, 'Préparatoire', 0, 0))
+        for t_nom in DEFAULT_TASKS_PREPARATOIRE:
+            db.execute('''INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide)
+                          VALUES (?,?,?,0,0,0)''', (str(uuid.uuid4()), cat_id, t_nom))
+
+    return jsonify({'id': cid, **{k: data.get(k,'') for k in
+                    ['nom','adresse','client','logoUrl','dateDebut','dateFin','commentaires']},
+                    'progress': 0}), 201
 
 
 @app.route('/api/chantiers/<cid>', methods=['PUT'])
 def update_chantier(cid):
-    data = request.json; wb = load_wb()
-    chantiers = sheet_to_records(wb['Chantiers'])
-    for c in chantiers:
-        if str(c['id']) == cid:
-            for k in ['nom','adresse','client','logoUrl','dateDebut','dateFin','commentaires']:
-                if k in data: c[k] = data[k]
-            break
-    records_to_sheet(wb['Chantiers'], chantiers, CHANTIER_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    d = request.json
+    with get_db() as db:
+        db.execute('''UPDATE chantiers SET nom=?, adresse=?, client=?, logo_url=?,
+                      date_debut=?, date_fin=?, commentaires=? WHERE id=?''',
+                   (d.get('nom'), d.get('adresse'), d.get('client'), d.get('logoUrl'),
+                    d.get('dateDebut'), d.get('dateFin'), d.get('commentaires'), cid))
+    return jsonify({'success': True})
 
 
 @app.route('/api/chantiers/<cid>', methods=['DELETE'])
 def delete_chantier(cid):
-    wb = load_wb()
-    records_to_sheet(wb['Chantiers'],
-                     [c for c in sheet_to_records(wb['Chantiers']) if str(c['id']) != cid],
-                     CHANTIER_HEADERS)
-    categories = sheet_to_records(wb['Categories'])
-    cat_ids    = {str(c['id']) for c in categories if str(c.get('chantierId')) == cid}
-    records_to_sheet(wb['Categories'],
-                     [c for c in categories if str(c.get('chantierId')) != cid],
-                     CATEGORIE_HEADERS)
-    records_to_sheet(wb['Taches'],
-                     [t for t in sheet_to_records(wb['Taches']) if str(t.get('categorieId')) not in cat_ids],
-                     TACHE_HEADERS)
-    records_to_sheet(wb['Planning'],
-                     [p for p in sheet_to_records(wb['Planning']) if str(p.get('chantierId')) != cid],
-                     PLANNING_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    with get_db() as db:
+        db.execute('DELETE FROM chantiers WHERE id=?', (cid,))
+    return jsonify({'success': True})
 
 
 # ── Catégories ────────────────────────────────────────────────────────────────
 
 @app.route('/api/categories', methods=['POST'])
 def create_categorie():
-    data = request.json; wb = load_wb()
-    categories = sheet_to_records(wb['Categories'])
-    new_cat = {'id': str(uuid.uuid4()), 'chantierId': data['chantierId'],
-               'nom': data['nom'], 'ordre': len(categories), 'isCustom': True}
-    categories.append(new_cat)
-    records_to_sheet(wb['Categories'], categories, CATEGORIE_HEADERS)
-    save_wb(wb)
-    new_cat.update({'tasks': [], 'progress': 0, 'totalCount': 0, 'score': 0, 'maxScore': 0})
-    return jsonify(new_cat), 201
+    d = request.json
+    cat_id = str(uuid.uuid4())
+    with get_db() as db:
+        ordre = db.execute('SELECT COUNT(*) FROM categories WHERE chantier_id=?',
+                           (d['chantierId'],)).fetchone()[0]
+        db.execute('INSERT INTO categories (id, chantier_id, nom, ordre, is_custom) VALUES (?,?,?,?,1)',
+                   (cat_id, d['chantierId'], d['nom'], ordre))
+    return jsonify({'id': cat_id, 'chantierId': d['chantierId'], 'nom': d['nom'],
+                    'ordre': ordre, 'isCustom': True,
+                    'tasks': [], 'progress': 0, 'totalCount': 0,
+                    'score': 0, 'maxScore': 0}), 201
 
 
 @app.route('/api/categories/<cat_id>', methods=['DELETE'])
 def delete_categorie(cat_id):
-    wb = load_wb()
-    records_to_sheet(wb['Categories'],
-                     [c for c in sheet_to_records(wb['Categories']) if str(c['id']) != cat_id],
-                     CATEGORIE_HEADERS)
-    records_to_sheet(wb['Taches'],
-                     [t for t in sheet_to_records(wb['Taches']) if str(t.get('categorieId')) != cat_id],
-                     TACHE_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    with get_db() as db:
+        db.execute('DELETE FROM categories WHERE id=?', (cat_id,))
+    return jsonify({'success': True})
 
 
 # ── Tâches ────────────────────────────────────────────────────────────────────
 
 @app.route('/api/taches', methods=['POST'])
 def create_tache():
-    data = request.json; wb = load_wb()
-    taches = sheet_to_records(wb['Taches'])
-    new_t  = {'id': str(uuid.uuid4()), 'categorieId': data['categorieId'],
-              'nom': data['nom'], 'etabli': 0, 'envoye': 0, 'valide': 0}
-    taches.append(new_t)
-    records_to_sheet(wb['Taches'], taches, TACHE_HEADERS)
-    save_wb(wb); return jsonify(new_t), 201
+    d = request.json
+    tid = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute('INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide) VALUES (?,?,?,0,0,0)',
+                   (tid, d['categorieId'], d['nom']))
+    return jsonify({'id': tid, 'categorieId': d['categorieId'],
+                    'nom': d['nom'], 'etabli': 0, 'envoye': 0, 'valide': 0}), 201
 
 
 @app.route('/api/taches/<tid>', methods=['PUT'])
 def update_tache(tid):
-    data = request.json; wb = load_wb()
-    taches = sheet_to_records(wb['Taches'])
-    for t in taches:
-        if str(t['id']) == tid:
-            for k in ['nom','etabli','envoye','valide']:
-                if k in data: t[k] = data[k]
-            break
-    records_to_sheet(wb['Taches'], taches, TACHE_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    d = request.json
+    with get_db() as db:
+        fields, vals = [], []
+        for key in ['nom', 'etabli', 'envoye', 'valide']:
+            if key in d:
+                fields.append(f'{key}=?'); vals.append(d[key])
+        if fields:
+            db.execute(f'UPDATE taches SET {", ".join(fields)} WHERE id=?', (*vals, tid))
+    return jsonify({'success': True})
 
 
 @app.route('/api/taches/<tid>', methods=['DELETE'])
 def delete_tache(tid):
-    wb = load_wb()
-    records_to_sheet(wb['Taches'],
-                     [t for t in sheet_to_records(wb['Taches']) if str(t['id']) != tid],
-                     TACHE_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    with get_db() as db:
+        db.execute('DELETE FROM taches WHERE id=?', (tid,))
+    return jsonify({'success': True})
 
 
-# ── Planning items ────────────────────────────────────────────────────────────
+# ── Planning ──────────────────────────────────────────────────────────────────
 
 @app.route('/api/planning/items')
 def get_planning_items():
-    wb = load_wb()
-    return jsonify(sheet_to_records(wb['Planning']))
+    with get_db() as db:
+        rows = db.execute('SELECT * FROM planning').fetchall()
+    return jsonify([{
+        'id':         r['id'],
+        'chantierId': r['chantier_id'],
+        'phase':      r['phase'],
+        'dateDebut':  r['date_debut'],
+        'dateFin':    r['date_fin'],
+    } for r in rows])
 
 
 @app.route('/api/planning/items', methods=['POST'])
 def create_planning_item():
-    data = request.json; wb = load_wb()
-    items = sheet_to_records(wb['Planning'])
-    new_item = {'id': str(uuid.uuid4()), 'chantierId': data['chantierId'],
-                'phase': data['phase'], 'dateDebut': data['dateDebut'], 'dateFin': data['dateFin']}
-    items.append(new_item)
-    records_to_sheet(wb['Planning'], items, PLANNING_HEADERS)
-    save_wb(wb); return jsonify(new_item), 201
+    d = request.json
+    pid = str(uuid.uuid4())
+    with get_db() as db:
+        db.execute('INSERT INTO planning (id, chantier_id, phase, date_debut, date_fin) VALUES (?,?,?,?,?)',
+                   (pid, d['chantierId'], d['phase'], d['dateDebut'], d['dateFin']))
+    return jsonify({'id': pid, 'chantierId': d['chantierId'], 'phase': d['phase'],
+                    'dateDebut': d['dateDebut'], 'dateFin': d['dateFin']}), 201
 
 
 @app.route('/api/planning/items/<pid>', methods=['PUT'])
 def update_planning_item(pid):
-    data = request.json; wb = load_wb()
-    items = sheet_to_records(wb['Planning'])
-    for item in items:
-        if str(item['id']) == pid:
-            for k in ['phase','dateDebut','dateFin']:
-                if k in data: item[k] = data[k]
-            break
-    records_to_sheet(wb['Planning'], items, PLANNING_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    d = request.json
+    with get_db() as db:
+        fields, vals = [], []
+        mapping = {'phase': 'phase', 'dateDebut': 'date_debut', 'dateFin': 'date_fin'}
+        for k, col in mapping.items():
+            if k in d:
+                fields.append(f'{col}=?'); vals.append(d[k])
+        if fields:
+            db.execute(f'UPDATE planning SET {", ".join(fields)} WHERE id=?', (*vals, pid))
+    return jsonify({'success': True})
 
 
 @app.route('/api/planning/items/<pid>', methods=['DELETE'])
 def delete_planning_item(pid):
-    wb = load_wb()
-    records_to_sheet(wb['Planning'],
-                     [i for i in sheet_to_records(wb['Planning']) if str(i['id']) != pid],
-                     PLANNING_HEADERS)
-    save_wb(wb); return jsonify({'success': True})
+    with get_db() as db:
+        db.execute('DELETE FROM planning WHERE id=?', (pid,))
+    return jsonify({'success': True})
 
 
-# ── Export / Import Excel ─────────────────────────────────────────────────────
+# ── Export Excel (depuis la BDD) ──────────────────────────────────────────────
 
 @app.route('/api/export')
 def export_excel():
-    if not os.path.exists(EXCEL_PATH): load_wb()
-    return send_file(EXCEL_PATH, as_attachment=True, download_name='chantiers.xlsx')
+    wb = Workbook()
 
+    with get_db() as db:
+        # Feuille Chantiers
+        ws = wb.active; ws.title = 'Chantiers'
+        ws.append(['id','nom','adresse','client','logoUrl','dateDebut','dateFin','commentaires'])
+        for r in db.execute('SELECT * FROM chantiers').fetchall():
+            ws.append([r['id'],r['nom'],r['adresse'],r['client'],r['logo_url'],
+                       r['date_debut'],r['date_fin'],r['commentaires']])
+
+        # Feuille Categories
+        ws2 = wb.create_sheet('Categories')
+        ws2.append(['id','chantierId','nom','ordre','isCustom'])
+        for r in db.execute('SELECT * FROM categories').fetchall():
+            ws2.append([r['id'],r['chantier_id'],r['nom'],r['ordre'],r['is_custom']])
+
+        # Feuille Taches
+        ws3 = wb.create_sheet('Taches')
+        ws3.append(['id','categorieId','nom','etabli','envoye','valide'])
+        for r in db.execute('SELECT * FROM taches').fetchall():
+            ws3.append([r['id'],r['categorie_id'],r['nom'],r['etabli'],r['envoye'],r['valide']])
+
+        # Feuille Planning
+        ws4 = wb.create_sheet('Planning')
+        ws4.append(['id','chantierId','phase','dateDebut','dateFin'])
+        for r in db.execute('SELECT * FROM planning').fetchall():
+            ws4.append([r['id'],r['chantier_id'],r['phase'],r['date_debut'],r['date_fin']])
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name='chantiers.xlsx',
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+# ── Import Excel (vers la BDD) ────────────────────────────────────────────────
 
 @app.route('/api/import', methods=['POST'])
 def import_excel():
-    if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-    ensure_data_dir(); request.files['file'].save(EXCEL_PATH)
-    return jsonify({'success': True})
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file'}), 400
+    try:
+        wb = openpyxl.load_workbook(request.files['file'])
+        with get_db() as db:
+            # Vider les tables (ordre important pour les FK)
+            db.executescript('''
+                DELETE FROM planning; DELETE FROM taches;
+                DELETE FROM categories; DELETE FROM chantiers;
+            ''')
 
+            def sheet_rows(name, headers):
+                if name not in wb.sheetnames: return
+                ws = wb[name]
+                rows = list(ws.iter_rows(values_only=True))
+                if not rows: return
+                h = [str(x) for x in rows[0]]
+                for row in rows[1:]:
+                    if all(v is None for v in row): continue
+                    yield {h[i]: (row[i] if i < len(row) else None) for i in range(len(h))}
+
+            for r in sheet_rows('Chantiers', []):
+                db.execute('''INSERT OR IGNORE INTO chantiers
+                    (id,nom,adresse,client,logo_url,date_debut,date_fin,commentaires)
+                    VALUES (?,?,?,?,?,?,?,?)''',
+                    (r.get('id'), r.get('nom'), r.get('adresse'), r.get('client'),
+                     r.get('logoUrl'), r.get('dateDebut'), r.get('dateFin'), r.get('commentaires')))
+
+            for r in sheet_rows('Categories', []):
+                db.execute('''INSERT OR IGNORE INTO categories
+                    (id,chantier_id,nom,ordre,is_custom) VALUES (?,?,?,?,?)''',
+                    (r.get('id'), r.get('chantierId'), r.get('nom'),
+                     r.get('ordre',0), r.get('isCustom',0)))
+
+            for r in sheet_rows('Taches', []):
+                db.execute('''INSERT OR IGNORE INTO taches
+                    (id,categorie_id,nom,etabli,envoye,valide) VALUES (?,?,?,?,?,?)''',
+                    (r.get('id'), r.get('categorieId'), r.get('nom'),
+                     r.get('etabli',0), r.get('envoye',0), r.get('valide',0)))
+
+            for r in sheet_rows('Planning', []):
+                db.execute('''INSERT OR IGNORE INTO planning
+                    (id,chantier_id,phase,date_debut,date_fin) VALUES (?,?,?,?,?)''',
+                    (r.get('id'), r.get('chantierId'), r.get('phase'),
+                     r.get('dateDebut'), r.get('dateFin')))
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Helpers camelCase ─────────────────────────────────────────────────────────
+
+def _camel(r):
+    """Convertit les clés snake_case SQLite en camelCase pour le frontend."""
+    MAP = {'logo_url': 'logoUrl', 'date_debut': 'dateDebut', 'date_fin': 'dateFin'}
+    return {MAP.get(k, k): v for k, v in r.items()}
+
+
+def _camel_cat(r):
+    out = {}
+    for k, v in r.items():
+        if k == 'chantier_id':   out['chantierId'] = v
+        elif k == 'is_custom':   out['isCustom']   = bool(v)
+        else:                    out[k] = v
+    return out
+
+
+# ── Init & lancement ──────────────────────────────────────────────────────────
+
+init_db()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
