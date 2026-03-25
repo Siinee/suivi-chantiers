@@ -46,6 +46,8 @@ def init_db():
                 adresse      TEXT,
                 client       TEXT,
                 logo_url     TEXT,
+                logo_blob    BLOB,
+                logo_mime    TEXT,
                 date_debut   TEXT,
                 date_fin     TEXT,
                 commentaires TEXT
@@ -79,6 +81,16 @@ def init_db():
                 FOREIGN KEY (chantier_id) REFERENCES chantiers(id) ON DELETE CASCADE
             );
         ''')
+
+
+def migrate_db():
+    """Ajoute les colonnes logo si la BDD existait avant cette version."""
+    with get_db() as db:
+        for col, typ in [('logo_blob', 'BLOB'), ('logo_mime', 'TEXT')]:
+            try:
+                db.execute(f'ALTER TABLE chantiers ADD COLUMN {col} {typ}')
+            except Exception:
+                pass  # Colonne déjà présente
 
 
 def row_to_dict(row):
@@ -303,6 +315,43 @@ def delete_planning_item(pid):
     return jsonify({'success': True})
 
 
+# ── Logo client (stocké en BLOB dans SQLite) ─────────────────────────────────
+
+@app.route('/api/logos/<cid>')
+def get_logo(cid):
+    """Sert le logo stocké en BLOB."""
+    with get_db() as db:
+        row = db.execute('SELECT logo_blob, logo_mime FROM chantiers WHERE id=?', (cid,)).fetchone()
+    if not row or not row['logo_blob']:
+        return '', 404
+    return send_file(io.BytesIO(bytes(row['logo_blob'])),
+                     mimetype=row['logo_mime'] or 'image/png')
+
+
+@app.route('/api/logos/<cid>', methods=['POST'])
+def upload_logo(cid):
+    """Reçoit un fichier image et le stocke en BLOB."""
+    if 'logo' not in request.files:
+        return jsonify({'error': 'No file'}), 400
+    f = request.files['logo']
+    mime = f.mimetype or 'image/png'
+    data = f.read()
+    if len(data) > 5 * 1024 * 1024:  # limite 5 Mo
+        return jsonify({'error': 'Fichier trop volumineux (max 5 Mo)'}), 413
+    with get_db() as db:
+        db.execute('UPDATE chantiers SET logo_blob=?, logo_mime=?, logo_url=NULL WHERE id=?',
+                   (data, mime, cid))
+    return jsonify({'url': f'/api/logos/{cid}'}), 200
+
+
+@app.route('/api/logos/<cid>', methods=['DELETE'])
+def delete_logo(cid):
+    """Supprime le logo stocké."""
+    with get_db() as db:
+        db.execute('UPDATE chantiers SET logo_blob=NULL, logo_mime=NULL WHERE id=?', (cid,))
+    return jsonify({'success': True})
+
+
 # ── Export Excel (depuis la BDD) ──────────────────────────────────────────────
 
 @app.route('/api/export')
@@ -399,9 +448,18 @@ def import_excel():
 # ── Helpers camelCase ─────────────────────────────────────────────────────────
 
 def _camel(r):
-    """Convertit les clés snake_case SQLite en camelCase pour le frontend."""
+    """Convertit les clés snake_case SQLite en camelCase pour le frontend.
+    Si un logo BLOB est stocké, expose l'URL de l'API à la place des données brutes."""
     MAP = {'logo_url': 'logoUrl', 'date_debut': 'dateDebut', 'date_fin': 'dateFin'}
-    return {MAP.get(k, k): v for k, v in r.items()}
+    out = {}
+    for k, v in r.items():
+        if k in ('logo_blob', 'logo_mime'):
+            continue  # jamais exposé directement
+        out[MAP.get(k, k)] = v
+    # Si un blob existe, l'URL du logo pointe vers notre route de service
+    if r.get('logo_blob'):
+        out['logoUrl'] = f'/api/logos/{r["id"]}'
+    return out
 
 
 def _camel_cat(r):
@@ -416,6 +474,7 @@ def _camel_cat(r):
 # ── Init & lancement ──────────────────────────────────────────────────────────
 
 init_db()
+migrate_db()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

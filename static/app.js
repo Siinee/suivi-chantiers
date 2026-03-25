@@ -209,9 +209,16 @@ function renderChantierCard(c) {
     </div>`;
 }
 
+// ── État logo temporaire ──────────────────────────────────────────────────────
+let _pendingLogo = null;   // File en attente d'upload
+let _deleteLogo  = false;  // Supprimer le logo existant
+
 // ── Formulaire chantier ───────────────────────────────────────────────────────
 async function showChantierForm(id) {
+  _pendingLogo = null; _deleteLogo = false;
   const v = id ? await API.get(`/api/chantiers/${id}`) : {};
+  const logoSrc = v.logoUrl || '';
+
   openModal(
     id ? `<i class="bi bi-pencil me-2"></i>Modifier le chantier`
        : `<i class="bi bi-plus-lg me-2"></i>Nouveau chantier`,
@@ -237,10 +244,35 @@ async function showChantierForm(id) {
            <label class="form-label">Date de fin</label>
            <input type="date" class="form-control" id="f-fin" value="${v.dateFin||''}">
          </div>
+
+         <!-- Logo upload -->
          <div class="col-12">
-           <label class="form-label">URL du logo client</label>
-           <input type="text" class="form-control" id="f-logo" placeholder="https://…" value="${esc(v.logoUrl||'')}">
+           <label class="form-label">Logo client</label>
+           <div class="logo-upload-zone" id="logo-upload-zone"
+                ondragover="event.preventDefault();this.classList.add('logo-drag')"
+                ondragleave="this.classList.remove('logo-drag')"
+                ondrop="dropLogo(event)"
+                onclick="document.getElementById('f-logo-file').click()">
+             <div id="logo-preview-area">
+               ${logoSrc
+                 ? `<div class="logo-current">
+                      <img src="${esc(logoSrc)}" id="logo-preview-img" alt="Logo">
+                    </div>`
+                 : `<div class="logo-placeholder">
+                      <i class="bi bi-image" style="font-size:2rem;color:#94a3b8"></i>
+                      <span class="d-block text-muted small mt-1">Glisser une image ici<br>ou cliquer pour sélectionner</span>
+                    </div>`}
+             </div>
+             <input type="file" id="f-logo-file" accept="image/*" style="display:none"
+                    onchange="pickLogo(this)">
+           </div>
+           ${logoSrc ? `<button type="button" class="btn btn-sm btn-outline-danger mt-2"
+                                onclick="clearLogoPreview()">
+                          <i class="bi bi-trash me-1"></i>Supprimer le logo
+                        </button>` : ''}
+           <div class="form-text">PNG, JPG, SVG — max 5 Mo. Stocké en base de données.</div>
          </div>
+
          <div class="col-12">
            <label class="form-label">Commentaires</label>
            <textarea class="form-control" id="f-comments" rows="3">${esc(v.commentaires||'')}</textarea>
@@ -253,18 +285,67 @@ async function showChantierForm(id) {
      </button>`);
 }
 
+function pickLogo(input) {
+  const file = input.files[0]; if (!file) return;
+  _pendingLogo = file; _deleteLogo = false;
+  showLogoPreview(URL.createObjectURL(file));
+}
+
+function dropLogo(event) {
+  event.preventDefault();
+  document.getElementById('logo-upload-zone').classList.remove('logo-drag');
+  const file = event.dataTransfer.files[0];
+  if (!file || !file.type.startsWith('image/')) return;
+  _pendingLogo = file; _deleteLogo = false;
+  showLogoPreview(URL.createObjectURL(file));
+}
+
+function showLogoPreview(src) {
+  document.getElementById('logo-preview-area').innerHTML = `
+    <div class="logo-current">
+      <img src="${src}" id="logo-preview-img" alt="Logo">
+    </div>`;
+}
+
+function clearLogoPreview() {
+  _pendingLogo = null; _deleteLogo = true;
+  document.getElementById('logo-preview-area').innerHTML = `
+    <div class="logo-placeholder">
+      <i class="bi bi-image" style="font-size:2rem;color:#94a3b8"></i>
+      <span class="d-block text-muted small mt-1">Glisser une image ici<br>ou cliquer pour sélectionner</span>
+    </div>`;
+}
+
 async function saveChantier(id) {
   const nom = document.getElementById('f-nom').value.trim();
   const cli = document.getElementById('f-client').value.trim();
   if (!nom || !cli) { toast('Nom et client sont obligatoires.', 'warning'); return; }
+
   const data = { nom, client: cli,
     adresse:      document.getElementById('f-adresse').value.trim(),
     dateDebut:    document.getElementById('f-debut').value,
     dateFin:      document.getElementById('f-fin').value,
-    logoUrl:      document.getElementById('f-logo').value.trim(),
     commentaires: document.getElementById('f-comments').value.trim() };
-  if (id) { await API.put(`/api/chantiers/${id}`, data); toast('Chantier mis à jour.'); }
-  else    { await API.post('/api/chantiers', data);       toast('Chantier créé.'); }
+
+  let cid = id;
+  if (id) {
+    await API.put(`/api/chantiers/${id}`, data);
+  } else {
+    const res = await API.post('/api/chantiers', data);
+    cid = res.id;
+  }
+
+  // Upload ou suppression du logo
+  if (_pendingLogo && cid) {
+    const fd = new FormData(); fd.append('logo', _pendingLogo);
+    const r = await fetch(`/api/logos/${cid}`, { method: 'POST', body: fd });
+    if (!r.ok) toast('Logo trop volumineux (max 5 Mo).', 'warning');
+  } else if (_deleteLogo && cid) {
+    await fetch(`/api/logos/${cid}`, { method: 'DELETE' });
+  }
+
+  _pendingLogo = null; _deleteLogo = false;
+  toast(id ? 'Chantier mis à jour.' : 'Chantier créé.');
   closeModal();
   if (state.view === 'chantier' && id) loadChantierDetail(id); else loadDashboard();
 }
