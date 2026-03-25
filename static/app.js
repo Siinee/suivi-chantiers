@@ -97,10 +97,9 @@ const API = {
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, type = 'success') {
   const id = 'toast-' + Date.now();
-  const col = { success:'#22c55e', danger:'#ef4444', info:'#3b82f6', warning:'#f59e0b' }[type] || '#3b82f6';
+  const typeClass = `toast-${type}`;
   document.getElementById('toast-container').insertAdjacentHTML('beforeend', `
-    <div id="${id}" class="toast align-items-center border-0 show"
-         style="background:${col};color:#fff;min-width:260px">
+    <div id="${id}" class="toast ${typeClass} align-items-center border-0 show">
       <div class="d-flex">
         <div class="toast-body fw-semibold">${msg}</div>
         <button class="btn-close btn-close-white me-2 m-auto"
@@ -148,7 +147,7 @@ function navigate(view, param) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadDashboard() {
   document.getElementById('app-root').innerHTML =
-    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border"></div></div>`;
   renderDashboard(await API.get('/api/chantiers'));
 }
 
@@ -156,7 +155,7 @@ function renderDashboard(chantiers) {
   document.getElementById('app-root').innerHTML = `
     <div class="d-flex justify-content-between align-items-center mb-4 no-print">
       <div>
-        <h4 class="mb-0 fw-bold text-dark"><i class="bi bi-building me-2 text-primary"></i>Tableau de bord</h4>
+        <h4 class="mb-0 fw-bold"><i class="bi bi-building me-2"></i>Tableau de bord</h4>
         <small class="text-muted">${chantiers.length} chantier${chantiers.length !== 1 ? 's' : ''}</small>
       </div>
       <button class="btn btn-primary" onclick="showChantierForm()">
@@ -165,9 +164,9 @@ function renderDashboard(chantiers) {
     </div>
     <div class="row g-3">
       ${chantiers.length === 0
-        ? `<div class="col-12 text-center py-5 text-muted">
-             <i class="bi bi-building-slash" style="font-size:3rem;opacity:.3"></i>
-             <p class="mt-3">Aucun chantier. Créez-en un ou importez un fichier Excel.</p>
+        ? `<div class="col-12 empty-state">
+             <i class="bi bi-building-slash"></i>
+             <p>Aucun chantier. Créez-en un ou importez un fichier Excel.</p>
            </div>`
         : chantiers.map(renderChantierCard).join('')}
     </div>`;
@@ -196,13 +195,13 @@ function renderChantierCard(c) {
             <div class="progress-bar" style="width:${pct}%;background:${color}"></div>
           </div>
         </div>
-        <div class="card-footer bg-transparent border-0 d-flex justify-content-end gap-2 no-print">
+        <div class="card-footer d-flex justify-content-end gap-2 no-print">
           <button class="btn btn-sm btn-outline-secondary"
-            onclick="event.stopPropagation();showChantierForm('${c.id}')">
+            onclick="event.stopPropagation();showChantierForm('${c.id}')" title="Modifier">
             <i class="bi bi-pencil"></i>
           </button>
           <button class="btn btn-sm btn-outline-danger"
-            onclick="event.stopPropagation();confirmDeleteChantier('${c.id}','${esc(c.nom)}')">
+            onclick="event.stopPropagation();confirmDeleteChantier('${c.id}','${esc(c.nom)}')" title="Supprimer">
             <i class="bi bi-trash"></i>
           </button>
         </div>
@@ -289,7 +288,7 @@ async function deleteChantier(id) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadChantierDetail(id) {
   document.getElementById('app-root').innerHTML =
-    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border"></div></div>`;
   renderChantierDetail(await API.get(`/api/chantiers/${id}`));
 }
 
@@ -299,21 +298,19 @@ function renderChantierDetail(c) {
     <nav aria-label="breadcrumb" class="no-print mb-3">
       <ol class="breadcrumb">
         <li class="breadcrumb-item">
-          <a href="#" onclick="navigate('dashboard')" class="text-primary text-decoration-none">Tableau de bord</a>
+          <a href="#" onclick="navigate('dashboard')">Tableau de bord</a>
         </li>
         <li class="breadcrumb-item active">${esc(c.nom)}</li>
       </ol>
     </nav>
 
-    <div class="card border-0 shadow-sm mb-4" style="border-radius:12px;overflow:hidden">
-      <div class="p-4 d-flex flex-wrap gap-4 align-items-start"
-           style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff">
+    <div class="card chantier-detail-card mb-4">
+      <div class="chantier-detail-header d-flex flex-wrap gap-4 align-items-start">
         <div class="flex-grow-1">
           <div class="d-flex align-items-center gap-3 mb-2">
-            ${c.logoUrl ? `<img src="${esc(c.logoUrl)}" alt="logo"
-                style="height:40px;object-fit:contain;background:#fff;border-radius:6px;padding:4px">` : ''}
-            <h4 class="mb-0 fw-bold">${esc(c.nom)}</h4>
-            <span class="badge rounded-pill ${s.cls}">${s.label}</span>
+            ${c.logoUrl ? `<div class="logo-container"><img src="${esc(c.logoUrl)}" alt="logo"></div>` : ''}
+            <h4 class="mb-0">${esc(c.nom)}</h4>
+            <span class="badge ${s.cls}">${s.label}</span>
           </div>
           <div class="d-flex flex-wrap gap-3 opacity-90 small">
             <span><i class="bi bi-person-fill me-1"></i>${esc(c.client||'—')}</span>
@@ -338,7 +335,7 @@ function renderChantierDetail(c) {
           <small class="fw-semibold text-secondary">Avancement global (Préparatoire)</small>
           <small class="fw-bold" style="color:${color}" id="global-pct-text">${pct}%</small>
         </div>
-        <div class="progress" style="height:10px">
+        <div class="progress">
           <div class="progress-bar" id="global-bar" style="width:${pct}%;background:${color}"></div>
         </div>
       </div>
@@ -348,15 +345,14 @@ function renderChantierDetail(c) {
     <div class="d-flex gap-3 mb-3 no-print flex-wrap">
       <small class="text-muted fw-semibold align-self-center">Statut :</small>
       ${STATUS.map(st => `
-        <span style="background:${st.bg};color:${st.color};padding:2px 10px;
-                     border-radius:20px;font-size:.78rem;font-weight:600">
+        <span class="status-legend-chip" style="background:${st.bg};color:${st.color}">
           ${st.label}
         </span>`).join('')}
       <small class="text-muted ms-2 align-self-center">Cliquer pour faire avancer.</small>
     </div>
 
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h5 class="mb-0 fw-bold"><i class="bi bi-list-check me-2 text-primary"></i>Tâches préparatoires</h5>
+      <h5 class="mb-0 fw-bold"><i class="bi bi-list-check me-2"></i>Tâches préparatoires</h5>
       <button class="btn btn-sm btn-outline-primary no-print"
               onclick="showAddCategoryModal('${c.id}')">
         <i class="bi bi-plus-lg me-1"></i>Ajouter une catégorie
@@ -597,7 +593,7 @@ function generatePeriods() {
 // ── Chargement & rendu planning ───────────────────────────────────────────────
 async function loadPlanning() {
   document.getElementById('app-root').innerHTML =
-    `<div class="d-flex justify-content-center py-5"><div class="spinner-border text-primary"></div></div>`;
+    `<div class="d-flex justify-content-center py-5"><div class="spinner-border"></div></div>`;
   if (!planningState.windowStart) initPlanningState();
   const [chantiers, items] = await Promise.all([
     API.get('/api/chantiers'),
@@ -617,11 +613,15 @@ function renderPlanning(chantiers, items) {
     ? `${fmtDate(first.start)} — ${fmtDate(last.end)}`
     : `${first.label.replace(/<[^>]+>/g,'')} — ${last.label.replace(/<[^>]+>/g,'')}`;
 
+  // Extraire clients et adresses uniques
+  const clients = [...new Set(chantiers.map(c => c.client).filter(Boolean))].sort();
+  const adresses = [...new Set(chantiers.map(c => c.adresse).filter(Boolean))].sort();
+
   document.getElementById('app-root').innerHTML = `
     <!-- Barre de contrôles -->
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 no-print gap-2">
       <div>
-        <h4 class="mb-0 fw-bold"><i class="bi bi-calendar3-week me-2 text-primary"></i>Planning</h4>
+        <h4 class="mb-0 fw-bold"><i class="bi bi-calendar3-week me-2"></i>Planning</h4>
         <small class="text-muted">${windowLabel}</small>
       </div>
       <div class="d-flex gap-2 flex-wrap align-items-center">
@@ -655,6 +655,23 @@ function renderPlanning(chantiers, items) {
       </div>
     </div>
 
+    <!-- Filtres -->
+    <div class="d-flex gap-2 flex-wrap mb-3 no-print align-items-center">
+      <small class="text-muted fw-semibold"><i class="bi bi-funnel me-1"></i>Filtres :</small>
+      <select class="form-select form-select-sm" id="filter-client" onchange="filterPlanning()" style="width:auto;max-width:200px">
+        <option value="">Tous les clients</option>
+        ${clients.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+      </select>
+      <select class="form-select form-select-sm" id="filter-adresse" onchange="filterPlanning()" style="width:auto;max-width:250px">
+        <option value="">Toutes les adresses</option>
+        ${adresses.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}
+      </select>
+      ${(document.getElementById('filter-client')?.value || document.getElementById('filter-adresse')?.value) ?
+        `<button class="btn btn-sm btn-outline-secondary" onclick="clearFilters()">
+          <i class="bi bi-x-circle me-1"></i>Effacer filtres
+        </button>` : ''}
+    </div>
+
     <!-- Légende phases -->
     <div class="d-flex gap-2 flex-wrap mb-3 no-print align-items-center">
       <small class="text-muted fw-semibold">Phases :</small>
@@ -684,7 +701,7 @@ function renderPlanning(chantiers, items) {
             }).join('')}
           </tr>
         </thead>
-        <tbody>
+        <tbody id="planning-tbody">
           ${chantiers.length === 0
             ? `<tr><td colspan="${periods.length+1}" class="text-center text-muted py-5">
                  Aucun chantier. <a href="#" onclick="navigate('dashboard')">Créez-en un d'abord.</a>
@@ -693,6 +710,9 @@ function renderPlanning(chantiers, items) {
         </tbody>
       </table>
     </div>`;
+
+  // Stocker pour le filtrage
+  window._planningData = { chantiers, items, periods, today };
 
   // Remplir l'en-tête d'impression
   document.getElementById('print-date').textContent =
@@ -714,7 +734,7 @@ function renderPlanning(chantiers, items) {
 function renderChantierPlanningRow(chantier, allItems, periods, today) {
   const myItems = allItems.filter(i => String(i.chantierId) === String(chantier.id));
 
-  const cells = periods.map(period => {
+  const cells = periods.map((period, periodIndex) => {
     const isNow = today >= period.start && today <= period.end;
 
     // 1 seul item par cellule (le premier trouvé)
@@ -742,18 +762,51 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
     const isFirst = iStart >= period.start && iStart <= period.end;
     const isLast  = iEnd   >= period.start && iEnd   <= period.end;
 
+    // Vérifier la phase précédente et suivante pour fusion visuelle
+    const prevPeriod = periodIndex > 0 ? periods[periodIndex - 1] : null;
+    const nextPeriod = periodIndex < periods.length - 1 ? periods[periodIndex + 1] : null;
+
+    let prevItem = null, nextItem = null;
+    if (prevPeriod) {
+      prevItem = myItems.find(i => {
+        const s = localDate(i.dateDebut);
+        const e = localDateEnd(i.dateFin);
+        return prevPeriod.start <= e && prevPeriod.end >= s;
+      });
+    }
+    if (nextPeriod) {
+      nextItem = myItems.find(i => {
+        const s = localDate(i.dateDebut);
+        const e = localDateEnd(i.dateFin);
+        return nextPeriod.start <= e && nextPeriod.end >= s;
+      });
+    }
+
+    // Fusion visuelle si même phase
+    const samePrev = prevItem && prevItem.phase === item.phase;
+    const sameNext = nextItem && nextItem.phase === item.phase;
+
     let pos, conn = '';
-    if (isFirst && isLast)  { pos = 'block-solo'; }
-    else if (isFirst)       { pos = 'block-start'; conn = 'cal-conn-r'; }
-    else if (isLast)        { pos = 'block-end';   conn = 'cal-conn-l'; }
-    else                    { pos = 'block-mid';   conn = 'cal-conn-l cal-conn-r'; }
+    if (isFirst && isLast && !samePrev && !sameNext) {
+      pos = 'block-solo';
+    } else if ((isFirst || !samePrev) && !sameNext && isLast) {
+      pos = 'block-solo';
+    } else if ((isFirst || !samePrev) && (sameNext || !isLast)) {
+      pos = 'block-start'; conn = 'cal-conn-r';
+    } else if ((isLast || !sameNext) && (samePrev || !isFirst)) {
+      pos = 'block-end'; conn = 'cal-conn-l';
+    } else {
+      pos = 'block-mid'; conn = 'cal-conn-l cal-conn-r';
+    }
+
+    const showLabel = (isFirst && !samePrev) || (!samePrev && periodIndex === 0) || (pos === 'block-solo') || (pos === 'block-start');
 
     const block = `
       <div class="phase-block ${pos}"
            style="background:${ph.bg};color:${ph.color}"
            title="${esc(item.phase)}"
            onclick="event.stopPropagation();showEditPlanningModal('${item.id}','${esc(item.phase)}','${item.dateDebut}','${item.dateFin}')">
-        ${isFirst ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
+        ${showLabel ? `<span class="phase-label">${esc(item.phase)}</span>` : ''}
       </div>`;
 
     return `<td class="cal-cell cal-has-phase ${conn}${isNow?' cal-today-col':''}" ${cellAttrs}>
@@ -764,8 +817,8 @@ function renderChantierPlanningRow(chantier, allItems, periods, today) {
   return `
     <tr class="cal-row">
       <td class="cal-chantier-td">
-        <div class="fw-semibold text-truncate" title="${esc(chantier.nom)}">${esc(chantier.nom)}</div>
-        <small class="text-muted d-block text-truncate">${esc(chantier.client||'')}</small>
+        <div class="fw-semibold text-truncate" title="${esc(chantier.nom)} - ${esc(chantier.client||'')}${chantier.adresse ? ' (' + esc(chantier.adresse) + ')' : ''}">${esc(chantier.nom)}</div>
+        <small class="text-muted d-block text-truncate" title="${esc(chantier.client||'')} - ${esc(chantier.adresse||'')}">${esc(chantier.client||'')}${chantier.adresse ? ' • ' + esc(chantier.adresse) : ''}</small>
       </td>
       ${cells}
     </tr>`;
@@ -1001,6 +1054,42 @@ function planningNav(dir) {
 
 function planningNavToday() {
   initPlanningState(); loadPlanning();
+}
+
+// ── Filtrage planning ─────────────────────────────────────────────────────────
+function filterPlanning() {
+  if (!window._planningData) return;
+
+  const { chantiers, items, periods, today } = window._planningData;
+  const filterClient = document.getElementById('filter-client')?.value || '';
+  const filterAdresse = document.getElementById('filter-adresse')?.value || '';
+
+  // Filtrer les chantiers
+  let filtered = chantiers;
+  if (filterClient) {
+    filtered = filtered.filter(c => c.client === filterClient);
+  }
+  if (filterAdresse) {
+    filtered = filtered.filter(c => c.adresse === filterAdresse);
+  }
+
+  // Re-render tbody
+  const tbody = document.getElementById('planning-tbody');
+  if (tbody) {
+    tbody.innerHTML = filtered.length === 0
+      ? `<tr><td colspan="${periods.length+1}" class="text-center text-muted py-5">
+           Aucun chantier ne correspond aux filtres.
+         </td></tr>`
+      : filtered.map(c => renderChantierPlanningRow(c, items, periods, today)).join('');
+  }
+}
+
+function clearFilters() {
+  const filterClient = document.getElementById('filter-client');
+  const filterAdresse = document.getElementById('filter-adresse');
+  if (filterClient) filterClient.value = '';
+  if (filterAdresse) filterAdresse.value = '';
+  filterPlanning();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
