@@ -2,21 +2,30 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Dépendances système minimales
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# Dépendances système (libpq pour psycopg2)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpq-dev gcc \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
-# Dépendances Python
+# Dépendances Python en premier (cache Docker)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Code source
 COPY . .
 
-# Dossier data persistent (monté en volume dans Dokploy)
-RUN mkdir -p /app/data
+# Utilisateur non-root pour la sécurité
+RUN useradd -m appuser && chown -R appuser /app
+USER appuser
 
 EXPOSE 5000
 
-# Gunicorn pour la production (4 workers)
-CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:5000", "--timeout", "120", "app:app"]
+# Gunicorn production : 4 workers, timeout 120s
+CMD ["gunicorn", \
+     "--workers", "4", \
+     "--bind", "0.0.0.0:5000", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "app:app"]

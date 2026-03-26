@@ -1,10 +1,16 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 .git/
 .gitignore
 .env
+.env.*
+!.env.example
 data/
 *.db
+*.sqlite
 *.xlsx
 .claude/
+README.md
+docker-compose.yml

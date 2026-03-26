@@ -3,8 +3,10 @@ Suivi Chantiers — Flask + PostgreSQL
 Authentification par sessions, rôles : admin | gestionnaire | readonly
 L'admin peut gérer les utilisateurs et la configuration par défaut des suivi.
 """
-import os, uuid, io
+import os, uuid, io, time, logging
 from functools import wraps
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 from flask import (Flask, jsonify, request, render_template,
                    send_file, session, redirect, url_for)
 import psycopg2, psycopg2.extras
@@ -26,6 +28,20 @@ def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
     return conn
+
+def wait_for_db(max_retries=15, delay=2):
+    """Attend que PostgreSQL soit prêt (utile au démarrage Docker)."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = get_db()
+            conn.close()
+            logging.info(f"PostgreSQL prêt (tentative {attempt})")
+            return
+        except psycopg2.OperationalError as e:
+            logging.warning(f"PostgreSQL pas encore prêt ({attempt}/{max_retries}) : {e}")
+            if attempt == max_retries:
+                raise RuntimeError("Impossible de joindre PostgreSQL après plusieurs tentatives.") from e
+            time.sleep(delay)
 
 def qall(conn, sql, p=()):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
@@ -848,7 +864,8 @@ def import_excel():
 
 # ── Lancement ──────────────────────────────────────────────────────────────────
 
-init_db()
+wait_for_db()   # Attend PostgreSQL avant de créer les tables
+init_db()       # Crée les tables + seed si nécessaire
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
