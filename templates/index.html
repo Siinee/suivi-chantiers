@@ -16,17 +16,26 @@
       <a class="navbar-brand fw-bold" href="#" onclick="navigate('dashboard')">
         <i class="bi bi-building-fill-gear me-2"></i>Suivi Chantiers
       </a>
-      <div class="d-flex align-items-center gap-3 ms-auto">
+      <div class="d-flex align-items-center gap-2 ms-auto">
         <button class="btn btn-outline-light btn-sm" onclick="navigate('planning')">
-          <i class="bi bi-calendar3 me-2"></i>Planning
+          <i class="bi bi-calendar3 me-1"></i>Planning
         </button>
         <label class="btn btn-outline-light btn-sm mb-0" title="Importer un fichier Excel">
-          <i class="bi bi-upload me-2"></i>Importer
+          <i class="bi bi-upload me-1"></i>Importer
           <input type="file" id="import-input" accept=".xlsx" style="display:none" onchange="importExcel(this)">
         </label>
-        <a class="btn btn-outline-light btn-sm" href="/api/export" title="Télécharger le fichier Excel">
-          <i class="bi bi-download me-2"></i>Exporter
+        <a class="btn btn-outline-light btn-sm" href="/api/export">
+          <i class="bi bi-download me-1"></i>Exporter
         </a>
+        <div class="vr bg-white opacity-25 mx-1"></div>
+        <!-- Bouton Admin (visible uniquement si admin) -->
+        <a id="btn-admin" href="/admin" class="btn btn-warning btn-sm d-none">
+          <i class="bi bi-shield-fill me-1"></i>Admin
+        </a>
+        <span class="text-white small opacity-75" id="nav-username"></span>
+        <button class="btn btn-outline-light btn-sm" onclick="logoutApp()">
+          <i class="bi bi-box-arrow-right"></i>
+        </button>
       </div>
     </div>
   </nav>

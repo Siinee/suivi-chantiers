@@ -1,480 +1,854 @@
 """
-Suivi Chantiers — Backend Flask
-Base de données : SQLite (data/chantiers.db)
-API identique à la version Excel, frontend inchangé.
+Suivi Chantiers — Flask + PostgreSQL
+Authentification par sessions, rôles : admin | gestionnaire | readonly
+L'admin peut gérer les utilisateurs et la configuration par défaut des suivi.
 """
-from flask import Flask, jsonify, request, render_template, send_file
-import sqlite3, os, uuid, io
+import os, uuid, io
+from functools import wraps
+from flask import (Flask, jsonify, request, render_template,
+                   send_file, session, redirect, url_for)
+import psycopg2, psycopg2.extras
+from werkzeug.security import generate_password_hash, check_password_hash
 import openpyxl
 from openpyxl import Workbook
 
 app = Flask(__name__)
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'chantiers.db')
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-CHANGE-IN-PROD')
 
-# Phases de planning (référence partagée)
-PLANNING_PHASES = [
-    'Désamiantage', 'Montage', 'Maçonnerie', 'CE/Levée de réserve',
-    'Démontage', 'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai'
-]
+DATABASE_URL = os.environ.get(
+    'DATABASE_URL',
+    'postgresql://suivi:suivi@localhost:5432/suivi_chantiers'
+)
 
-DEFAULT_TASKS_PREPARATOIRE = [
-    'Relevé de gaine', 'Demande Plan (Fournisseur)', 'Plan ascenseur (BE)',
-    'Commande Fournisseur', 'Demande Mise en FAB', 'Demande PGC',
-    'PPSPS Manei', 'Planning Prév fournisseur', 'Planning Prév BE/Client',
-    'Devis ST', 'Demande Agrément ST', 'Commande ST',
-    'PPSPS ST', 'Demande Date VIC', 'Commande Base de vie', 'Commande Container'
-]
-
-# ── Base de données ───────────────────────────────────────────────────────────
+# ── Connexion PostgreSQL ───────────────────────────────────────────────────────
 
 def get_db():
-    """Connexion SQLite avec retour de dict."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = False
     return conn
 
+def qall(conn, sql, p=()):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+        c.execute(sql, p); return [dict(r) for r in c.fetchall()]
+
+def qone(conn, sql, p=()):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+        c.execute(sql, p); r = c.fetchone(); return dict(r) if r else None
+
+def run(conn, sql, p=()):
+    with conn.cursor() as c: c.execute(sql, p)
+
+# ── Initialisation BDD ────────────────────────────────────────────────────────
+
+DDL = """
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS users (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username     VARCHAR(100) UNIQUE NOT NULL,
+    email        VARCHAR(255),
+    password_hash VARCHAR(255) NOT NULL,
+    role         VARCHAR(20)  NOT NULL DEFAULT 'gestionnaire',
+    is_active    BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMP    NOT NULL DEFAULT NOW(),
+    created_by   UUID REFERENCES users(id)
+);
+
+-- Catégories par défaut (éditables par l'admin)
+CREATE TABLE IF NOT EXISTS default_categories (
+    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    nom       VARCHAR(255) NOT NULL,
+    ordre     INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Tâches par défaut par catégorie (éditables par l'admin)
+CREATE TABLE IF NOT EXISTS default_tasks (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category_nom  VARCHAR(255) NOT NULL,
+    nom           VARCHAR(255) NOT NULL,
+    ordre         INTEGER NOT NULL DEFAULT 0,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS chantiers (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    nom          VARCHAR(255) NOT NULL,
+    adresse      TEXT,
+    client       VARCHAR(255),
+    logo_data    BYTEA,
+    logo_mime    VARCHAR(100),
+    date_debut   DATE,
+    date_fin     DATE,
+    commentaires TEXT,
+    created_by   UUID REFERENCES users(id),
+    created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chantier_id UUID NOT NULL REFERENCES chantiers(id) ON DELETE CASCADE,
+    nom         VARCHAR(255) NOT NULL,
+    ordre       INTEGER NOT NULL DEFAULT 0,
+    is_custom   BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS taches (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    categorie_id UUID NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    nom          VARCHAR(255) NOT NULL,
+    etabli       SMALLINT NOT NULL DEFAULT 0,
+    envoye       SMALLINT NOT NULL DEFAULT 0,
+    valide       SMALLINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS planning (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chantier_id UUID NOT NULL REFERENCES chantiers(id) ON DELETE CASCADE,
+    phase       VARCHAR(255) NOT NULL,
+    date_debut  DATE NOT NULL,
+    date_fin    DATE NOT NULL
+);
+"""
+
+DEFAULT_CATEGORIES_SEED = [
+    'Préparatoire', 'Montage', 'Maçonnerie', 'CE/Levée de réserve',
+    'Démontage', 'Pose de SAS', 'Mise à disposition', 'Contrôle & Essai', 'Désamiantage'
+]
+
+DEFAULT_TASKS_SEED = [
+    ('Préparatoire', 'Relevé de gaine'),
+    ('Préparatoire', 'Demande Plan (Fournisseur)'),
+    ('Préparatoire', 'Plan ascenseur (BE)'),
+    ('Préparatoire', 'Commande Fournisseur'),
+    ('Préparatoire', 'Demande Mise en FAB'),
+    ('Préparatoire', 'Demande PGC'),
+    ('Préparatoire', 'PPSPS Manei'),
+    ('Préparatoire', 'Planning Prév fournisseur'),
+    ('Préparatoire', 'Planning Prév BE/Client'),
+    ('Préparatoire', 'Devis ST'),
+    ('Préparatoire', 'Demande Agrément ST'),
+    ('Préparatoire', 'Commande ST'),
+    ('Préparatoire', 'PPSPS ST'),
+    ('Préparatoire', 'Demande Date VIC'),
+    ('Préparatoire', 'Commande Base de vie'),
+    ('Préparatoire', 'Commande Container'),
+]
 
 def init_db():
-    """Création des tables si elles n'existent pas."""
-    with get_db() as db:
-        db.executescript('''
-            CREATE TABLE IF NOT EXISTS chantiers (
-                id           TEXT PRIMARY KEY,
-                nom          TEXT NOT NULL,
-                adresse      TEXT,
-                client       TEXT,
-                logo_url     TEXT,
-                logo_blob    BLOB,
-                logo_mime    TEXT,
-                date_debut   TEXT,
-                date_fin     TEXT,
-                commentaires TEXT
-            );
+    conn = get_db()
+    try:
+        with conn.cursor() as c:
+            c.execute(DDL)
+        # Admin par défaut si aucun utilisateur
+        existing = qone(conn, "SELECT id FROM users LIMIT 1")
+        if not existing:
+            run(conn, """
+                INSERT INTO users (username, email, password_hash, role)
+                VALUES (%s, %s, %s, 'admin')
+            """, ('admin', 'admin@local.fr', generate_password_hash('Admin1234!')))
 
-            CREATE TABLE IF NOT EXISTS categories (
-                id          TEXT PRIMARY KEY,
-                chantier_id TEXT NOT NULL,
-                nom         TEXT NOT NULL,
-                ordre       INTEGER DEFAULT 0,
-                is_custom   INTEGER DEFAULT 0,
-                FOREIGN KEY (chantier_id) REFERENCES chantiers(id) ON DELETE CASCADE
-            );
+        # Catégories par défaut si table vide
+        if not qone(conn, "SELECT id FROM default_categories LIMIT 1"):
+            for i, nom in enumerate(DEFAULT_CATEGORIES_SEED):
+                run(conn, "INSERT INTO default_categories (nom, ordre) VALUES (%s, %s)", (nom, i))
+        if not qone(conn, "SELECT id FROM default_tasks LIMIT 1"):
+            for i, (cat, task) in enumerate(DEFAULT_TASKS_SEED):
+                run(conn, "INSERT INTO default_tasks (category_nom, nom, ordre) VALUES (%s,%s,%s)",
+                    (cat, task, i))
+        conn.commit()
+    finally:
+        conn.close()
 
-            CREATE TABLE IF NOT EXISTS taches (
-                id           TEXT PRIMARY KEY,
-                categorie_id TEXT NOT NULL,
-                nom          TEXT NOT NULL,
-                etabli       INTEGER DEFAULT 0,
-                envoye       INTEGER DEFAULT 0,
-                valide       INTEGER DEFAULT 0,
-                FOREIGN KEY (categorie_id) REFERENCES categories(id) ON DELETE CASCADE
-            );
+# ── Auth helpers ──────────────────────────────────────────────────────────────
 
-            CREATE TABLE IF NOT EXISTS planning (
-                id          TEXT PRIMARY KEY,
-                chantier_id TEXT NOT NULL,
-                phase       TEXT NOT NULL,
-                date_debut  TEXT NOT NULL,
-                date_fin    TEXT NOT NULL,
-                FOREIGN KEY (chantier_id) REFERENCES chantiers(id) ON DELETE CASCADE
-            );
-        ''')
+def current_user():
+    uid = session.get('user_id')
+    if not uid: return None
+    conn = get_db()
+    try:
+        return qone(conn, "SELECT id, username, role, is_active FROM users WHERE id=%s", (uid,))
+    finally:
+        conn.close()
 
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        u = current_user()
+        if not u or not u['is_active']:
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Non authentifié'}), 401
+            return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return decorated
 
-def migrate_db():
-    """Ajoute les colonnes logo si la BDD existait avant cette version."""
-    with get_db() as db:
-        for col, typ in [('logo_blob', 'BLOB'), ('logo_mime', 'TEXT')]:
-            try:
-                db.execute(f'ALTER TABLE chantiers ADD COLUMN {col} {typ}')
-            except Exception:
-                pass  # Colonne déjà présente
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        u = current_user()
+        if not u or u['role'] != 'admin':
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Accès refusé'}), 403
+            return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return decorated
 
+def readonly_check():
+    """Retourne True si l'utilisateur courant est readonly (bloquer les mutations)."""
+    u = current_user()
+    return u and u['role'] == 'readonly'
 
-def row_to_dict(row):
-    return dict(row) if row else None
+# ── Pages HTML ────────────────────────────────────────────────────────────────
 
-
-def rows_to_list(rows):
-    return [dict(r) for r in rows]
-
-
-# ── Calcul avancement ─────────────────────────────────────────────────────────
-
-def task_score(t):
-    return (t['etabli'] or 0) + (t['envoye'] or 0) + (t['valide'] or 0)
-
-
-def compute_progress_db(db, chantier_id):
-    rows = db.execute('''
-        SELECT t.etabli, t.envoye, t.valide
-        FROM taches t
-        JOIN categories c ON t.categorie_id = c.id
-        WHERE c.chantier_id = ?
-    ''', (chantier_id,)).fetchall()
-    if not rows:
-        return 0
-    total_score = sum((r['etabli'] or 0) + (r['envoye'] or 0) + (r['valide'] or 0) for r in rows)
-    total_max   = len(rows) * 6
-    return round(total_score / total_max * 100)
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
+@app.route('/login', methods=['GET'])
+def login_page():
+    if current_user():
+        return redirect('/')
+    return render_template('login.html')
 
 @app.route('/')
+@login_required
 def index():
-    return render_template('index.html')
+    return render_template('index.html', user=current_user())
 
+@app.route('/admin')
+@admin_required
+def admin_page():
+    return render_template('admin.html', user=current_user())
+
+# ── Auth API ──────────────────────────────────────────────────────────────────
+
+@app.route('/api/auth/login', methods=['POST'])
+def api_login():
+    d = request.json
+    conn = get_db()
+    try:
+        u = qone(conn, "SELECT * FROM users WHERE username=%s AND is_active=TRUE",
+                 (d.get('username',''),))
+        if not u or not check_password_hash(u['password_hash'], d.get('password','')):
+            return jsonify({'error': 'Identifiants incorrects'}), 401
+        session['user_id'] = str(u['id'])
+        return jsonify({'username': u['username'], 'role': u['role']})
+    finally:
+        conn.close()
+
+@app.route('/api/auth/logout', methods=['POST'])
+def api_logout():
+    session.clear()
+    return jsonify({'success': True})
+
+@app.route('/api/auth/me')
+@login_required
+def api_me():
+    u = current_user()
+    return jsonify({'username': u['username'], 'role': u['role']})
+
+# ── Admin : gestion utilisateurs ─────────────────────────────────────────────
+
+@app.route('/api/admin/users')
+@admin_required
+def admin_get_users():
+    conn = get_db()
+    try:
+        users = qall(conn, """
+            SELECT u.id, u.username, u.email, u.role, u.is_active, u.created_at,
+                   c.username AS created_by_name
+            FROM users u
+            LEFT JOIN users c ON c.id = u.created_by
+            ORDER BY u.created_at
+        """)
+        for u in users:
+            u['id']         = str(u['id'])
+            u['created_at'] = u['created_at'].strftime('%d/%m/%Y') if u['created_at'] else ''
+        return jsonify(users)
+    finally:
+        conn.close()
+
+@app.route('/api/admin/users', methods=['POST'])
+@admin_required
+def admin_create_user():
+    d = request.json
+    if not d.get('username') or not d.get('password'):
+        return jsonify({'error': 'username et password requis'}), 400
+    conn = get_db()
+    try:
+        existing = qone(conn, "SELECT id FROM users WHERE username=%s", (d['username'],))
+        if existing:
+            return jsonify({'error': 'Ce nom d\'utilisateur existe déjà'}), 409
+        uid = str(uuid.uuid4())
+        run(conn, """
+            INSERT INTO users (id, username, email, password_hash, role, created_by)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (uid, d['username'], d.get('email',''),
+              generate_password_hash(d['password']),
+              d.get('role','gestionnaire'),
+              session.get('user_id')))
+        conn.commit()
+        return jsonify({'id': uid, 'username': d['username']}), 201
+    finally:
+        conn.close()
+
+@app.route('/api/admin/users/<uid>', methods=['PUT'])
+@admin_required
+def admin_update_user(uid):
+    d = request.json
+    conn = get_db()
+    try:
+        if d.get('password'):
+            run(conn, "UPDATE users SET password_hash=%s WHERE id=%s",
+                (generate_password_hash(d['password']), uid))
+        if 'role' in d:
+            run(conn, "UPDATE users SET role=%s WHERE id=%s", (d['role'], uid))
+        if 'email' in d:
+            run(conn, "UPDATE users SET email=%s WHERE id=%s", (d['email'], uid))
+        if 'is_active' in d:
+            # Empêcher de désactiver son propre compte
+            if str(uid) == str(session.get('user_id')) and not d['is_active']:
+                return jsonify({'error': 'Impossible de désactiver votre propre compte'}), 400
+            run(conn, "UPDATE users SET is_active=%s WHERE id=%s", (d['is_active'], uid))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/users/<uid>', methods=['DELETE'])
+@admin_required
+def admin_delete_user(uid):
+    if str(uid) == str(session.get('user_id')):
+        return jsonify({'error': 'Impossible de supprimer votre propre compte'}), 400
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM users WHERE id=%s", (uid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
+
+# ── Admin : configuration par défaut des suivis ───────────────────────────────
+
+@app.route('/api/admin/defaults')
+@admin_required
+def admin_get_defaults():
+    conn = get_db()
+    try:
+        cats  = qall(conn, "SELECT * FROM default_categories ORDER BY ordre")
+        tasks = qall(conn, "SELECT * FROM default_tasks ORDER BY category_nom, ordre")
+        for r in cats:  r['id'] = str(r['id'])
+        for r in tasks: r['id'] = str(r['id'])
+        return jsonify({'categories': cats, 'tasks': tasks})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/categories', methods=['POST'])
+@admin_required
+def admin_add_default_cat():
+    d = request.json
+    conn = get_db()
+    try:
+        max_ordre = qone(conn, "SELECT COALESCE(MAX(ordre),0)+1 AS n FROM default_categories")['n']
+        cid = str(uuid.uuid4())
+        run(conn, "INSERT INTO default_categories (id, nom, ordre) VALUES (%s,%s,%s)",
+            (cid, d['nom'], max_ordre))
+        conn.commit()
+        return jsonify({'id': cid, 'nom': d['nom'], 'ordre': max_ordre, 'is_active': True}), 201
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/categories/<cid>', methods=['PUT'])
+@admin_required
+def admin_update_default_cat(cid):
+    d = request.json
+    conn = get_db()
+    try:
+        if 'nom' in d:       run(conn, "UPDATE default_categories SET nom=%s WHERE id=%s",       (d['nom'], cid))
+        if 'is_active' in d: run(conn, "UPDATE default_categories SET is_active=%s WHERE id=%s", (d['is_active'], cid))
+        if 'ordre' in d:     run(conn, "UPDATE default_categories SET ordre=%s WHERE id=%s",     (d['ordre'], cid))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/categories/<cid>', methods=['DELETE'])
+@admin_required
+def admin_delete_default_cat(cid):
+    conn = get_db()
+    try:
+        cat = qone(conn, "SELECT nom FROM default_categories WHERE id=%s", (cid,))
+        if cat:
+            run(conn, "DELETE FROM default_tasks WHERE category_nom=%s", (cat['nom'],))
+        run(conn, "DELETE FROM default_categories WHERE id=%s", (cid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/tasks', methods=['POST'])
+@admin_required
+def admin_add_default_task():
+    d = request.json
+    conn = get_db()
+    try:
+        max_o = qone(conn,
+            "SELECT COALESCE(MAX(ordre),0)+1 AS n FROM default_tasks WHERE category_nom=%s",
+            (d['category_nom'],))['n']
+        tid = str(uuid.uuid4())
+        run(conn, "INSERT INTO default_tasks (id, category_nom, nom, ordre) VALUES (%s,%s,%s,%s)",
+            (tid, d['category_nom'], d['nom'], max_o))
+        conn.commit()
+        return jsonify({'id': tid, 'category_nom': d['category_nom'], 'nom': d['nom'],
+                        'ordre': max_o, 'is_active': True}), 201
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/tasks/<tid>', methods=['PUT'])
+@admin_required
+def admin_update_default_task(tid):
+    d = request.json
+    conn = get_db()
+    try:
+        if 'nom' in d:       run(conn, "UPDATE default_tasks SET nom=%s WHERE id=%s",       (d['nom'], tid))
+        if 'is_active' in d: run(conn, "UPDATE default_tasks SET is_active=%s WHERE id=%s", (d['is_active'], tid))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
+
+@app.route('/api/admin/defaults/tasks/<tid>', methods=['DELETE'])
+@admin_required
+def admin_delete_default_task(tid):
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM default_tasks WHERE id=%s", (tid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 # ── Chantiers ─────────────────────────────────────────────────────────────────
 
-@app.route('/api/chantiers')
-def get_chantiers():
-    with get_db() as db:
-        chantiers = rows_to_list(db.execute('SELECT * FROM chantiers ORDER BY nom').fetchall())
-        result = []
-        for c in chantiers:
-            c['progress'] = compute_progress_db(db, c['id'])
-            result.append(_camel(c))
-        return jsonify(result)
+def compute_progress(conn, chantier_id):
+    rows = qall(conn, """
+        SELECT t.etabli, t.envoye, t.valide FROM taches t
+        JOIN categories c ON t.categorie_id = c.id
+        WHERE c.chantier_id = %s
+    """, (chantier_id,))
+    if not rows: return 0
+    return round(sum(r['etabli']+r['envoye']+r['valide'] for r in rows) / (len(rows)*6) * 100)
 
+def fmt_chantier(c, progress=0):
+    return {
+        'id':           str(c['id']),
+        'nom':          c['nom'],
+        'adresse':      c['adresse'],
+        'client':       c['client'],
+        'logoUrl':      f'/api/logos/{c["id"]}' if c.get('logo_data') else (c.get('logo_url') or ''),
+        'dateDebut':    str(c['date_debut']) if c.get('date_debut') else '',
+        'dateFin':      str(c['date_fin'])   if c.get('date_fin')   else '',
+        'commentaires': c['commentaires'],
+        'progress':     progress,
+    }
+
+@app.route('/api/chantiers')
+@login_required
+def get_chantiers():
+    conn = get_db()
+    try:
+        chantiers = qall(conn, "SELECT * FROM chantiers ORDER BY nom")
+        return jsonify([fmt_chantier(c, compute_progress(conn, c['id'])) for c in chantiers])
+    finally:
+        conn.close()
 
 @app.route('/api/chantiers/<cid>')
+@login_required
 def get_chantier(cid):
-    with get_db() as db:
-        c = row_to_dict(db.execute('SELECT * FROM chantiers WHERE id=?', (cid,)).fetchone())
-        if not c:
-            return jsonify({'error': 'Not found'}), 404
-
-        cats = rows_to_list(db.execute(
-            'SELECT * FROM categories WHERE chantier_id=? ORDER BY ordre', (cid,)).fetchall())
-
+    conn = get_db()
+    try:
+        c = qone(conn, "SELECT * FROM chantiers WHERE id=%s", (cid,))
+        if not c: return jsonify({'error': 'Not found'}), 404
+        cats = qall(conn, "SELECT * FROM categories WHERE chantier_id=%s ORDER BY ordre", (cid,))
         for cat in cats:
-            tasks = rows_to_list(db.execute(
-                'SELECT * FROM taches WHERE categorie_id=?', (cat['id'],)).fetchall())
-            score   = sum(task_score(t) for t in tasks)
-            max_s   = len(tasks) * 6
-            cat['tasks']      = [_camel(t) for t in tasks]
-            cat['totalCount'] = len(tasks)
+            tasks = qall(conn, "SELECT * FROM taches WHERE categorie_id=%s", (cat['id'],))
+            score = sum(t['etabli']+t['envoye']+t['valide'] for t in tasks)
+            maxs  = len(tasks)*6
+            cat['id']         = str(cat['id'])
+            cat['chantierId'] = str(cat['chantier_id'])
+            cat['isCustom']   = cat['is_custom']
+            cat['tasks']      = [fmt_tache(t) for t in tasks]
             cat['score']      = score
-            cat['maxScore']   = max_s
-            cat['progress']   = round(score / max_s * 100) if max_s else 0
-            cat['isCustom']   = bool(cat.get('is_custom'))
-
-        c['categories'] = [_camel_cat(cat) for cat in cats]
-        c['progress']   = compute_progress_db(db, cid)
-        return jsonify(_camel(c))
-
+            cat['maxScore']   = maxs
+            cat['totalCount'] = len(tasks)
+            cat['progress']   = round(score/maxs*100) if maxs else 0
+        result = fmt_chantier(c, compute_progress(conn, cid))
+        result['categories'] = cats
+        return jsonify(result)
+    finally:
+        conn.close()
 
 @app.route('/api/chantiers', methods=['POST'])
+@login_required
 def create_chantier():
-    data = request.json
-    cid  = str(uuid.uuid4())
-    with get_db() as db:
-        db.execute('''INSERT INTO chantiers
-            (id, nom, adresse, client, logo_url, date_debut, date_fin, commentaires)
-            VALUES (?,?,?,?,?,?,?,?)''',
-            (cid, data.get('nom',''), data.get('adresse',''), data.get('client',''),
-             data.get('logoUrl',''), data.get('dateDebut',''),
-             data.get('dateFin',''), data.get('commentaires','')))
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    d = request.json
+    cid = str(uuid.uuid4())
+    conn = get_db()
+    try:
+        run(conn, """
+            INSERT INTO chantiers (id, nom, adresse, client, date_debut, date_fin, commentaires, created_by)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (cid, d.get('nom',''), d.get('adresse',''), d.get('client',''),
+              d.get('dateDebut') or None, d.get('dateFin') or None,
+              d.get('commentaires',''), session.get('user_id')))
 
-        # Catégorie Préparatoire par défaut
-        cat_id = str(uuid.uuid4())
-        db.execute('''INSERT INTO categories (id, chantier_id, nom, ordre, is_custom)
-                      VALUES (?,?,?,?,?)''', (cat_id, cid, 'Préparatoire', 0, 0))
-        for t_nom in DEFAULT_TASKS_PREPARATOIRE:
-            db.execute('''INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide)
-                          VALUES (?,?,?,0,0,0)''', (str(uuid.uuid4()), cat_id, t_nom))
+        # Catégories par défaut actives
+        default_cats = qall(conn,
+            "SELECT * FROM default_categories WHERE is_active=TRUE ORDER BY ordre")
+        for i, dc in enumerate(default_cats):
+            catid = str(uuid.uuid4())
+            run(conn, """
+                INSERT INTO categories (id, chantier_id, nom, ordre, is_custom)
+                VALUES (%s,%s,%s,%s,FALSE)
+            """, (catid, cid, dc['nom'], i))
+            # Tâches par défaut pour cette catégorie
+            tasks = qall(conn, """
+                SELECT * FROM default_tasks
+                WHERE category_nom=%s AND is_active=TRUE ORDER BY ordre
+            """, (dc['nom'],))
+            for t in tasks:
+                run(conn, """
+                    INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide)
+                    VALUES (%s,%s,%s,0,0,0)
+                """, (str(uuid.uuid4()), catid, t['nom']))
 
-    return jsonify({'id': cid, **{k: data.get(k,'') for k in
-                    ['nom','adresse','client','logoUrl','dateDebut','dateFin','commentaires']},
-                    'progress': 0}), 201
-
+        conn.commit()
+        return jsonify({'id': cid, **{k: d.get(k,'') for k in
+                        ['nom','adresse','client','dateDebut','dateFin','commentaires']},
+                        'logoUrl': '', 'progress': 0}), 201
+    finally:
+        conn.close()
 
 @app.route('/api/chantiers/<cid>', methods=['PUT'])
+@login_required
 def update_chantier(cid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
-    with get_db() as db:
-        db.execute('''UPDATE chantiers SET nom=?, adresse=?, client=?, logo_url=?,
-                      date_debut=?, date_fin=?, commentaires=? WHERE id=?''',
-                   (d.get('nom'), d.get('adresse'), d.get('client'), d.get('logoUrl'),
-                    d.get('dateDebut'), d.get('dateFin'), d.get('commentaires'), cid))
-    return jsonify({'success': True})
-
+    conn = get_db()
+    try:
+        run(conn, """
+            UPDATE chantiers SET nom=%s, adresse=%s, client=%s,
+            date_debut=%s, date_fin=%s, commentaires=%s WHERE id=%s
+        """, (d.get('nom'), d.get('adresse'), d.get('client'),
+              d.get('dateDebut') or None, d.get('dateFin') or None,
+              d.get('commentaires'), cid))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 @app.route('/api/chantiers/<cid>', methods=['DELETE'])
+@login_required
 def delete_chantier(cid):
-    with get_db() as db:
-        db.execute('DELETE FROM chantiers WHERE id=?', (cid,))
-    return jsonify({'success': True})
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM chantiers WHERE id=%s", (cid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
+# ── Logo ──────────────────────────────────────────────────────────────────────
+
+@app.route('/api/logos/<cid>')
+@login_required
+def get_logo(cid):
+    conn = get_db()
+    try:
+        r = qone(conn, "SELECT logo_data, logo_mime FROM chantiers WHERE id=%s", (cid,))
+    finally:
+        conn.close()
+    if not r or not r['logo_data']:
+        return '', 404
+    return send_file(io.BytesIO(bytes(r['logo_data'])), mimetype=r['logo_mime'] or 'image/png')
+
+@app.route('/api/logos/<cid>', methods=['POST'])
+@login_required
+def upload_logo(cid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    if 'logo' not in request.files:
+        return jsonify({'error': 'Aucun fichier'}), 400
+    f = request.files['logo']
+    data = f.read()
+    if len(data) > 5*1024*1024:
+        return jsonify({'error': 'Fichier trop volumineux (max 5 Mo)'}), 413
+    conn = get_db()
+    try:
+        run(conn, "UPDATE chantiers SET logo_data=%s, logo_mime=%s WHERE id=%s",
+            (psycopg2.Binary(data), f.mimetype or 'image/png', cid))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'url': f'/api/logos/{cid}'})
+
+@app.route('/api/logos/<cid>', methods=['DELETE'])
+@login_required
+def delete_logo(cid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    conn = get_db()
+    try:
+        run(conn, "UPDATE chantiers SET logo_data=NULL, logo_mime=NULL WHERE id=%s", (cid,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'success': True})
 
 # ── Catégories ────────────────────────────────────────────────────────────────
 
 @app.route('/api/categories', methods=['POST'])
+@login_required
 def create_categorie():
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
-    cat_id = str(uuid.uuid4())
-    with get_db() as db:
-        ordre = db.execute('SELECT COUNT(*) FROM categories WHERE chantier_id=?',
-                           (d['chantierId'],)).fetchone()[0]
-        db.execute('INSERT INTO categories (id, chantier_id, nom, ordre, is_custom) VALUES (?,?,?,?,1)',
-                   (cat_id, d['chantierId'], d['nom'], ordre))
-    return jsonify({'id': cat_id, 'chantierId': d['chantierId'], 'nom': d['nom'],
-                    'ordre': ordre, 'isCustom': True,
-                    'tasks': [], 'progress': 0, 'totalCount': 0,
-                    'score': 0, 'maxScore': 0}), 201
+    conn = get_db()
+    try:
+        ordre = qone(conn, "SELECT COUNT(*) AS n FROM categories WHERE chantier_id=%s",
+                     (d['chantierId'],))['n']
+        catid = str(uuid.uuid4())
+        run(conn, """
+            INSERT INTO categories (id, chantier_id, nom, ordre, is_custom)
+            VALUES (%s,%s,%s,%s,TRUE)
+        """, (catid, d['chantierId'], d['nom'], ordre))
+        conn.commit()
+        return jsonify({'id': catid, 'chantierId': d['chantierId'], 'nom': d['nom'],
+                        'ordre': ordre, 'isCustom': True,
+                        'tasks': [], 'progress': 0, 'totalCount': 0,
+                        'score': 0, 'maxScore': 0}), 201
+    finally:
+        conn.close()
 
-
-@app.route('/api/categories/<cat_id>', methods=['DELETE'])
-def delete_categorie(cat_id):
-    with get_db() as db:
-        db.execute('DELETE FROM categories WHERE id=?', (cat_id,))
-    return jsonify({'success': True})
-
+@app.route('/api/categories/<catid>', methods=['DELETE'])
+@login_required
+def delete_categorie(catid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM categories WHERE id=%s", (catid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 # ── Tâches ────────────────────────────────────────────────────────────────────
 
+def fmt_tache(t):
+    return {'id': str(t['id']), 'categorieId': str(t['categorie_id']),
+            'nom': t['nom'], 'etabli': t['etabli'],
+            'envoye': t['envoye'], 'valide': t['valide']}
+
 @app.route('/api/taches', methods=['POST'])
+@login_required
 def create_tache():
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
     tid = str(uuid.uuid4())
-    with get_db() as db:
-        db.execute('INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide) VALUES (?,?,?,0,0,0)',
-                   (tid, d['categorieId'], d['nom']))
-    return jsonify({'id': tid, 'categorieId': d['categorieId'],
-                    'nom': d['nom'], 'etabli': 0, 'envoye': 0, 'valide': 0}), 201
-
+    conn = get_db()
+    try:
+        run(conn, """
+            INSERT INTO taches (id, categorie_id, nom, etabli, envoye, valide)
+            VALUES (%s,%s,%s,0,0,0)
+        """, (tid, d['categorieId'], d['nom']))
+        conn.commit()
+        return jsonify({'id': tid, 'categorieId': d['categorieId'],
+                        'nom': d['nom'], 'etabli': 0, 'envoye': 0, 'valide': 0}), 201
+    finally:
+        conn.close()
 
 @app.route('/api/taches/<tid>', methods=['PUT'])
+@login_required
 def update_tache(tid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
-    with get_db() as db:
-        fields, vals = [], []
-        for key in ['nom', 'etabli', 'envoye', 'valide']:
-            if key in d:
-                fields.append(f'{key}=?'); vals.append(d[key])
+    conn = get_db()
+    try:
+        fields = []
+        vals   = []
+        for k in ['nom','etabli','envoye','valide']:
+            if k in d: fields.append(f'{k}=%s'); vals.append(d[k])
         if fields:
-            db.execute(f'UPDATE taches SET {", ".join(fields)} WHERE id=?', (*vals, tid))
-    return jsonify({'success': True})
-
+            run(conn, f"UPDATE taches SET {', '.join(fields)} WHERE id=%s", (*vals, tid))
+            conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 @app.route('/api/taches/<tid>', methods=['DELETE'])
+@login_required
 def delete_tache(tid):
-    with get_db() as db:
-        db.execute('DELETE FROM taches WHERE id=?', (tid,))
-    return jsonify({'success': True})
-
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM taches WHERE id=%s", (tid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 # ── Planning ──────────────────────────────────────────────────────────────────
 
-@app.route('/api/planning/items')
-def get_planning_items():
-    with get_db() as db:
-        rows = db.execute('SELECT * FROM planning').fetchall()
-    return jsonify([{
-        'id':         r['id'],
-        'chantierId': r['chantier_id'],
-        'phase':      r['phase'],
-        'dateDebut':  r['date_debut'],
-        'dateFin':    r['date_fin'],
-    } for r in rows])
+def fmt_plan(r):
+    return {'id': str(r['id']), 'chantierId': str(r['chantier_id']),
+            'phase': r['phase'],
+            'dateDebut': str(r['date_debut']), 'dateFin': str(r['date_fin'])}
 
+@app.route('/api/planning/items')
+@login_required
+def get_planning_items():
+    conn = get_db()
+    try:
+        return jsonify([fmt_plan(r) for r in qall(conn, "SELECT * FROM planning")])
+    finally:
+        conn.close()
 
 @app.route('/api/planning/items', methods=['POST'])
+@login_required
 def create_planning_item():
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
     pid = str(uuid.uuid4())
-    with get_db() as db:
-        db.execute('INSERT INTO planning (id, chantier_id, phase, date_debut, date_fin) VALUES (?,?,?,?,?)',
-                   (pid, d['chantierId'], d['phase'], d['dateDebut'], d['dateFin']))
-    return jsonify({'id': pid, 'chantierId': d['chantierId'], 'phase': d['phase'],
-                    'dateDebut': d['dateDebut'], 'dateFin': d['dateFin']}), 201
-
+    conn = get_db()
+    try:
+        run(conn, """
+            INSERT INTO planning (id, chantier_id, phase, date_debut, date_fin)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (pid, d['chantierId'], d['phase'], d['dateDebut'], d['dateFin']))
+        conn.commit()
+        return jsonify({'id': pid, 'chantierId': d['chantierId'], 'phase': d['phase'],
+                        'dateDebut': d['dateDebut'], 'dateFin': d['dateFin']}), 201
+    finally:
+        conn.close()
 
 @app.route('/api/planning/items/<pid>', methods=['PUT'])
+@login_required
 def update_planning_item(pid):
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     d = request.json
-    with get_db() as db:
+    conn = get_db()
+    try:
+        mapping = {'phase':'phase','dateDebut':'date_debut','dateFin':'date_fin'}
         fields, vals = [], []
-        mapping = {'phase': 'phase', 'dateDebut': 'date_debut', 'dateFin': 'date_fin'}
         for k, col in mapping.items():
-            if k in d:
-                fields.append(f'{col}=?'); vals.append(d[k])
+            if k in d: fields.append(f'{col}=%s'); vals.append(d[k])
         if fields:
-            db.execute(f'UPDATE planning SET {", ".join(fields)} WHERE id=?', (*vals, pid))
-    return jsonify({'success': True})
-
+            run(conn, f"UPDATE planning SET {', '.join(fields)} WHERE id=%s", (*vals, pid))
+            conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
 @app.route('/api/planning/items/<pid>', methods=['DELETE'])
+@login_required
 def delete_planning_item(pid):
-    with get_db() as db:
-        db.execute('DELETE FROM planning WHERE id=?', (pid,))
-    return jsonify({'success': True})
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
+    conn = get_db()
+    try:
+        run(conn, "DELETE FROM planning WHERE id=%s", (pid,))
+        conn.commit()
+        return jsonify({'success': True})
+    finally:
+        conn.close()
 
-
-# ── Logo client (stocké en BLOB dans SQLite) ─────────────────────────────────
-
-@app.route('/api/logos/<cid>')
-def get_logo(cid):
-    """Sert le logo stocké en BLOB."""
-    with get_db() as db:
-        row = db.execute('SELECT logo_blob, logo_mime FROM chantiers WHERE id=?', (cid,)).fetchone()
-    if not row or not row['logo_blob']:
-        return '', 404
-    return send_file(io.BytesIO(bytes(row['logo_blob'])),
-                     mimetype=row['logo_mime'] or 'image/png')
-
-
-@app.route('/api/logos/<cid>', methods=['POST'])
-def upload_logo(cid):
-    """Reçoit un fichier image et le stocke en BLOB."""
-    if 'logo' not in request.files:
-        return jsonify({'error': 'No file'}), 400
-    f = request.files['logo']
-    mime = f.mimetype or 'image/png'
-    data = f.read()
-    if len(data) > 5 * 1024 * 1024:  # limite 5 Mo
-        return jsonify({'error': 'Fichier trop volumineux (max 5 Mo)'}), 413
-    with get_db() as db:
-        db.execute('UPDATE chantiers SET logo_blob=?, logo_mime=?, logo_url=NULL WHERE id=?',
-                   (data, mime, cid))
-    return jsonify({'url': f'/api/logos/{cid}'}), 200
-
-
-@app.route('/api/logos/<cid>', methods=['DELETE'])
-def delete_logo(cid):
-    """Supprime le logo stocké."""
-    with get_db() as db:
-        db.execute('UPDATE chantiers SET logo_blob=NULL, logo_mime=NULL WHERE id=?', (cid,))
-    return jsonify({'success': True})
-
-
-# ── Export Excel (depuis la BDD) ──────────────────────────────────────────────
+# ── Export / Import Excel ─────────────────────────────────────────────────────
 
 @app.route('/api/export')
+@login_required
 def export_excel():
     wb = Workbook()
-
-    with get_db() as db:
-        # Feuille Chantiers
+    conn = get_db()
+    try:
         ws = wb.active; ws.title = 'Chantiers'
-        ws.append(['id','nom','adresse','client','logoUrl','dateDebut','dateFin','commentaires'])
-        for r in db.execute('SELECT * FROM chantiers').fetchall():
-            ws.append([r['id'],r['nom'],r['adresse'],r['client'],r['logo_url'],
-                       r['date_debut'],r['date_fin'],r['commentaires']])
+        ws.append(['id','nom','adresse','client','dateDebut','dateFin','commentaires'])
+        for r in qall(conn, "SELECT * FROM chantiers ORDER BY nom"):
+            ws.append([str(r['id']),r['nom'],r['adresse'],r['client'],
+                       str(r['date_debut'] or ''),str(r['date_fin'] or ''),r['commentaires']])
 
-        # Feuille Categories
         ws2 = wb.create_sheet('Categories')
         ws2.append(['id','chantierId','nom','ordre','isCustom'])
-        for r in db.execute('SELECT * FROM categories').fetchall():
-            ws2.append([r['id'],r['chantier_id'],r['nom'],r['ordre'],r['is_custom']])
+        for r in qall(conn, "SELECT * FROM categories ORDER BY ordre"):
+            ws2.append([str(r['id']),str(r['chantier_id']),r['nom'],r['ordre'],r['is_custom']])
 
-        # Feuille Taches
         ws3 = wb.create_sheet('Taches')
         ws3.append(['id','categorieId','nom','etabli','envoye','valide'])
-        for r in db.execute('SELECT * FROM taches').fetchall():
-            ws3.append([r['id'],r['categorie_id'],r['nom'],r['etabli'],r['envoye'],r['valide']])
+        for r in qall(conn, "SELECT * FROM taches"):
+            ws3.append([str(r['id']),str(r['categorie_id']),r['nom'],
+                        r['etabli'],r['envoye'],r['valide']])
 
-        # Feuille Planning
         ws4 = wb.create_sheet('Planning')
         ws4.append(['id','chantierId','phase','dateDebut','dateFin'])
-        for r in db.execute('SELECT * FROM planning').fetchall():
-            ws4.append([r['id'],r['chantier_id'],r['phase'],r['date_debut'],r['date_fin']])
+        for r in qall(conn, "SELECT * FROM planning"):
+            ws4.append([str(r['id']),str(r['chantier_id']),r['phase'],
+                        str(r['date_debut']),str(r['date_fin'])])
+    finally:
+        conn.close()
 
-    buf = io.BytesIO()
-    wb.save(buf); buf.seek(0)
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return send_file(buf, as_attachment=True, download_name='chantiers.xlsx',
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-
-# ── Import Excel (vers la BDD) ────────────────────────────────────────────────
-
 @app.route('/api/import', methods=['POST'])
+@login_required
 def import_excel():
+    if readonly_check(): return jsonify({'error': 'Accès en lecture seule'}), 403
     if 'file' not in request.files:
         return jsonify({'error': 'No file'}), 400
     try:
-        wb = openpyxl.load_workbook(request.files['file'])
-        with get_db() as db:
-            # Vider les tables (ordre important pour les FK)
-            db.executescript('''
-                DELETE FROM planning; DELETE FROM taches;
-                DELETE FROM categories; DELETE FROM chantiers;
-            ''')
+        wb  = openpyxl.load_workbook(request.files['file'])
+        conn = get_db()
+        try:
+            run(conn, "DELETE FROM planning"); run(conn, "DELETE FROM taches")
+            run(conn, "DELETE FROM categories"); run(conn, "DELETE FROM chantiers")
 
-            def sheet_rows(name, headers):
+            def rows(name):
                 if name not in wb.sheetnames: return
-                ws = wb[name]
-                rows = list(ws.iter_rows(values_only=True))
-                if not rows: return
-                h = [str(x) for x in rows[0]]
-                for row in rows[1:]:
+                ws = wb[name]; data = list(ws.iter_rows(values_only=True))
+                if not data: return
+                h = [str(x) for x in data[0]]
+                for row in data[1:]:
                     if all(v is None for v in row): continue
-                    yield {h[i]: (row[i] if i < len(row) else None) for i in range(len(h))}
+                    yield {h[i]: row[i] for i in range(len(h))}
 
-            for r in sheet_rows('Chantiers', []):
-                db.execute('''INSERT OR IGNORE INTO chantiers
-                    (id,nom,adresse,client,logo_url,date_debut,date_fin,commentaires)
-                    VALUES (?,?,?,?,?,?,?,?)''',
-                    (r.get('id'), r.get('nom'), r.get('adresse'), r.get('client'),
-                     r.get('logoUrl'), r.get('dateDebut'), r.get('dateFin'), r.get('commentaires')))
-
-            for r in sheet_rows('Categories', []):
-                db.execute('''INSERT OR IGNORE INTO categories
-                    (id,chantier_id,nom,ordre,is_custom) VALUES (?,?,?,?,?)''',
-                    (r.get('id'), r.get('chantierId'), r.get('nom'),
-                     r.get('ordre',0), r.get('isCustom',0)))
-
-            for r in sheet_rows('Taches', []):
-                db.execute('''INSERT OR IGNORE INTO taches
-                    (id,categorie_id,nom,etabli,envoye,valide) VALUES (?,?,?,?,?,?)''',
-                    (r.get('id'), r.get('categorieId'), r.get('nom'),
-                     r.get('etabli',0), r.get('envoye',0), r.get('valide',0)))
-
-            for r in sheet_rows('Planning', []):
-                db.execute('''INSERT OR IGNORE INTO planning
-                    (id,chantier_id,phase,date_debut,date_fin) VALUES (?,?,?,?,?)''',
-                    (r.get('id'), r.get('chantierId'), r.get('phase'),
-                     r.get('dateDebut'), r.get('dateFin')))
-
+            for r in rows('Chantiers'):
+                run(conn, """
+                    INSERT INTO chantiers (id,nom,adresse,client,date_debut,date_fin,commentaires)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """, (r.get('id'), r.get('nom'), r.get('adresse'), r.get('client'),
+                      r.get('dateDebut') or None, r.get('dateFin') or None, r.get('commentaires')))
+            for r in rows('Categories'):
+                run(conn, """
+                    INSERT INTO categories (id,chantier_id,nom,ordre,is_custom)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (r.get('id'),r.get('chantierId'),r.get('nom'),
+                      r.get('ordre',0), bool(r.get('isCustom',False))))
+            for r in rows('Taches'):
+                run(conn, """
+                    INSERT INTO taches (id,categorie_id,nom,etabli,envoye,valide)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                """, (r.get('id'),r.get('categorieId'),r.get('nom'),
+                      r.get('etabli',0),r.get('envoye',0),r.get('valide',0)))
+            for r in rows('Planning'):
+                run(conn, """
+                    INSERT INTO planning (id,chantier_id,phase,date_debut,date_fin)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (r.get('id'),r.get('chantierId'),r.get('phase'),
+                      r.get('dateDebut'),r.get('dateFin')))
+            conn.commit()
+        finally:
+            conn.close()
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
-# ── Helpers camelCase ─────────────────────────────────────────────────────────
-
-def _camel(r):
-    """Convertit les clés snake_case SQLite en camelCase pour le frontend.
-    Si un logo BLOB est stocké, expose l'URL de l'API à la place des données brutes."""
-    MAP = {'logo_url': 'logoUrl', 'date_debut': 'dateDebut', 'date_fin': 'dateFin'}
-    out = {}
-    for k, v in r.items():
-        if k in ('logo_blob', 'logo_mime'):
-            continue  # jamais exposé directement
-        out[MAP.get(k, k)] = v
-    # Si un blob existe, l'URL du logo pointe vers notre route de service
-    if r.get('logo_blob'):
-        out['logoUrl'] = f'/api/logos/{r["id"]}'
-    return out
-
-
-def _camel_cat(r):
-    out = {}
-    for k, v in r.items():
-        if k == 'chantier_id':   out['chantierId'] = v
-        elif k == 'is_custom':   out['isCustom']   = bool(v)
-        else:                    out[k] = v
-    return out
-
-
-# ── Init & lancement ──────────────────────────────────────────────────────────
+# ── Lancement ──────────────────────────────────────────────────────────────────
 
 init_db()
-migrate_db()
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)

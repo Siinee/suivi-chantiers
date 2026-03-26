@@ -1186,5 +1186,25 @@ async function importExcel(input) {
   input.value = '';
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function initAuth() {
+  try {
+    const me = await fetch('/api/auth/me').then(r => r.json());
+    if (me.error) { window.location.href = '/login'; return false; }
+    const nameEl   = document.getElementById('nav-username');
+    const adminBtn = document.getElementById('btn-admin');
+    if (nameEl)  nameEl.textContent = me.username;
+    if (adminBtn && me.role === 'admin') adminBtn.classList.remove('d-none');
+    return true;
+  } catch { window.location.href = '/login'; return false; }
+}
+
+async function logoutApp() {
+  await fetch('/api/auth/logout', { method:'POST' });
+  window.location.href = '/login';
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => loadDashboard());
+document.addEventListener('DOMContentLoaded', async () => {
+  if (await initAuth()) loadDashboard();
+});
